@@ -7,10 +7,89 @@ import {
   getDefinition,
   getHover,
   getModuleIdentities,
+  getRenameTarget,
   getSignatureHelp,
   getTypeFields,
   resolveName
 } from './vbaProject';
+import { getBundledExcelHostDefinitions } from './excelHostCatalog';
+
+test('VbaProject loads the bundled Excel HostDefinition catalog by default', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit'
+      ].join('\n')
+    }
+  ]);
+  const catalog = getBundledExcelHostDefinitions();
+  const host_names = project.hostDefinitions.map((definition) => definition.name);
+
+  assert.deepEqual(
+    catalog.map((definition) => definition.name),
+    ['Application', 'Workbook', 'Worksheet', 'Range']
+  );
+  assert.deepEqual(host_names, ['Application', 'Workbook', 'Worksheet', 'Range']);
+});
+
+test('bundled Excel HostDefinitions appear in completion and hover', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    Application',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  const completions = getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 4, character: 7 }
+  });
+  const hover = getHover(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 4, character: 8 }
+  });
+
+  assert.deepEqual(
+    completions.map((item) => item.label),
+    ['Application']
+  );
+  assert.deepEqual(hover, {
+    contents: 'Represents the Microsoft Excel application.'
+  });
+});
+
+test('bundled Excel HostDefinitions are not source definition or rename targets', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    Range',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  const request = {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 4, character: 8 }
+  };
+
+  assert.equal(getDefinition(project, request), undefined);
+  assert.equal(getRenameTarget(project, request), undefined);
+});
 
 test('completion includes a Public Function from a sibling module in the same VbaProject', () => {
   const project = buildVbaProject([
@@ -459,34 +538,39 @@ test('definition resolves a ModuleIdentity-qualified reference to the qualified 
 });
 
 test('FormDesignerBlock content does not create completion candidates', () => {
-  const project = buildVbaProject([
+  const project = buildVbaProject(
+    [
+      {
+        uri: 'file:///project/Caller.bas',
+        text: [
+          'Attribute VB_Name = "Caller"',
+          'Option Explicit',
+          '',
+          'Public Sub Run()',
+          '    ',
+          'End Sub'
+        ].join('\n')
+      },
+      {
+        uri: 'file:///project/SampleForm.frm',
+        text: [
+          'VERSION 5.00',
+          'Begin VB.Form SampleForm',
+          '   Caption = "Sample"',
+          '   Public Function DesignerValue() As String',
+          'End',
+          'Attribute VB_Name = "SampleForm"',
+          'Option Explicit',
+          '',
+          'Public Function CodeValue() As String',
+          'End Function'
+        ].join('\n')
+      }
+    ],
     {
-      uri: 'file:///project/Caller.bas',
-      text: [
-        'Attribute VB_Name = "Caller"',
-        'Option Explicit',
-        '',
-        'Public Sub Run()',
-        '    ',
-        'End Sub'
-      ].join('\n')
-    },
-    {
-      uri: 'file:///project/SampleForm.frm',
-      text: [
-        'VERSION 5.00',
-        'Begin VB.Form SampleForm',
-        '   Caption = "Sample"',
-        '   Public Function DesignerValue() As String',
-        'End',
-        'Attribute VB_Name = "SampleForm"',
-        'Option Explicit',
-        '',
-        'Public Function CodeValue() As String',
-        'End Function'
-      ].join('\n')
+      hostDefinitions: []
     }
-  ]);
+  );
 
   const completions = getCompletions(project, {
     uri: 'file:///project/Caller.bas',

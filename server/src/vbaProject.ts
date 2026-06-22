@@ -1,5 +1,7 @@
 import path from 'node:path';
 
+import { getBundledExcelHostDefinitions } from './excelHostCatalog';
+
 export interface SourcePosition {
   line: number;
   character: number;
@@ -26,6 +28,7 @@ export interface CompletionRequest {
 
 export interface HostDefinition {
   name: string;
+  documentation?: string;
 }
 
 export interface BuildVbaProjectOptions {
@@ -132,7 +135,7 @@ export function buildVbaProject(
 
   return {
     modules,
-    hostDefinitions: options.hostDefinitions ?? []
+    hostDefinitions: options.hostDefinitions ?? getBundledExcelHostDefinitions()
   };
 }
 
@@ -143,14 +146,17 @@ export function getCompletions(project: VbaProject, request: CompletionRequest):
   }
 
   const prefix = getIdentifierPrefix(current_module.lines, request.position).toLowerCase();
-  const candidates = project.modules
+  const project_candidates = project.modules
     .filter((module) => module.folderUri.toLowerCase() === current_module.folderUri.toLowerCase())
     .flatMap((module) => module.definitions)
     .filter((definition) => definition.visibility === 'public')
     .filter((definition) => prefix === '' || definition.name.toLowerCase().startsWith(prefix))
     .map((definition) => ({ label: definition.name }));
+  const host_candidates = project.hostDefinitions
+    .filter((definition) => prefix === '' || definition.name.toLowerCase().startsWith(prefix))
+    .map((definition) => ({ label: definition.name }));
 
-  return candidates;
+  return uniqueCompletionEntries([...project_candidates, ...host_candidates]);
 }
 
 export function getModuleIdentities(project: VbaProject): string[] {
@@ -169,12 +175,18 @@ export function getTypeFields(project: VbaProject, typeName: string): { name: st
 }
 
 export function getHover(project: VbaProject, request: CompletionRequest): HoverResult | undefined {
-  const definition_location = getDefinition(project, request);
-  if (definition_location === undefined) {
+  const resolution = resolveName(project, request);
+  if (resolution === undefined) {
     return undefined;
   }
 
-  const definition = findDefinitionByLocation(project, definition_location);
+  if (resolution.source === 'host') {
+    return resolution.definition.documentation === undefined
+      ? undefined
+      : { contents: resolution.definition.documentation };
+  }
+
+  const definition = findDefinitionByLocation(project, resolution.definition);
   const documentation = definition === undefined
     ? undefined
     : findDocumentationForDefinition(project, definition);
@@ -185,6 +197,23 @@ export function getHover(project: VbaProject, request: CompletionRequest): Hover
   return {
     contents: renderDocumentationComment(documentation)
   };
+}
+
+function uniqueCompletionEntries(entries: CompletionEntry[]): CompletionEntry[] {
+  const seen_names = new Set<string>();
+  const unique_entries: CompletionEntry[] = [];
+
+  for (const entry of entries) {
+    const key = entry.label.toLowerCase();
+    if (seen_names.has(key)) {
+      continue;
+    }
+
+    seen_names.add(key);
+    unique_entries.push(entry);
+  }
+
+  return unique_entries;
 }
 
 export function getSignatureHelp(
@@ -231,6 +260,14 @@ export function getSignatureHelp(
 }
 
 export function getDefinition(
+  project: VbaProject,
+  request: CompletionRequest
+): DefinitionLocation | undefined {
+  const resolution = resolveName(project, request);
+  return resolution?.source === 'vba' ? resolution.definition : undefined;
+}
+
+export function getRenameTarget(
   project: VbaProject,
   request: CompletionRequest
 ): DefinitionLocation | undefined {

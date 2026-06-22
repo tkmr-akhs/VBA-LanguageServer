@@ -10,6 +10,7 @@ import {
   getModuleMemberRanges,
   getRenameEdits,
   getRenameTarget,
+  getSemanticTokens,
   getSignatureHelp,
   getTypeFields,
   resolveName,
@@ -1986,3 +1987,265 @@ test('missing implementation and interface documentation produces no hover', () 
 
   assert.equal(hover, undefined);
 });
+
+test('SemanticTokens classify declarations and resolved references without unresolved or ambiguous identifiers', () => {
+  const project = buildVbaProject(
+    [
+      {
+        uri: 'file:///project/Caller.bas',
+        text: [
+          'Attribute VB_Name = "Caller"',
+          'Option Explicit',
+          '',
+          'Public Sub Run(ByVal Mode As RunMode)',
+          '    Dim target As Range',
+          '    BuildValue',
+          '    MissingValue',
+          '    Range',
+          '    Mode = Manual',
+          'End Sub'
+        ].join('\n')
+      },
+      {
+        uri: 'file:///project/Builder.bas',
+        text: [
+          'Attribute VB_Name = "Builder"',
+          'Option Explicit',
+          '',
+          'Public Function BuildValue() As String',
+          '    BuildValue = "ok"',
+          'End Function'
+        ].join('\n')
+      },
+      {
+        uri: 'file:///project/FirstAmbiguous.bas',
+        text: [
+          'Attribute VB_Name = "FirstAmbiguous"',
+          'Option Explicit',
+          '',
+          'Public Function MissingValue() As String',
+          'End Function'
+        ].join('\n')
+      },
+      {
+        uri: 'file:///project/SecondAmbiguous.bas',
+        text: [
+          'Attribute VB_Name = "SecondAmbiguous"',
+          'Option Explicit',
+          '',
+          'Public Function MissingValue() As String',
+          'End Function'
+        ].join('\n')
+      },
+      {
+        uri: 'file:///project/Modes.bas',
+        text: [
+          'Attribute VB_Name = "Modes"',
+          'Option Explicit',
+          '',
+          'Public Enum RunMode',
+          '    Automatic = 0',
+          '    Manual',
+          'End Enum'
+        ].join('\n')
+      }
+    ],
+    {
+      hostDefinitions: [
+        {
+          name: 'Range',
+          kind: 'class',
+          members: [
+            { name: 'Address', kind: 'property' }
+          ]
+        }
+      ]
+    }
+  );
+
+  const tokens = getSemanticTokens(project, 'file:///project/Caller.bas');
+
+  assert.deepEqual(tokens, [
+    {
+      range: {
+        start: { line: 0, character: 21 },
+        end: { line: 0, character: 27 }
+      },
+      tokenType: 'namespace'
+    },
+    {
+      range: {
+        start: { line: 3, character: 11 },
+        end: { line: 3, character: 14 }
+      },
+      tokenType: 'function'
+    },
+    {
+      range: {
+        start: { line: 3, character: 21 },
+        end: { line: 3, character: 25 }
+      },
+      tokenType: 'parameter'
+    },
+    {
+      range: {
+        start: { line: 3, character: 29 },
+        end: { line: 3, character: 36 }
+      },
+      tokenType: 'enum'
+    },
+    {
+      range: {
+        start: { line: 4, character: 8 },
+        end: { line: 4, character: 14 }
+      },
+      tokenType: 'variable'
+    },
+    {
+      range: {
+        start: { line: 4, character: 18 },
+        end: { line: 4, character: 23 }
+      },
+      tokenType: 'class'
+    },
+    {
+      range: {
+        start: { line: 5, character: 4 },
+        end: { line: 5, character: 14 }
+      },
+      tokenType: 'function'
+    },
+    {
+      range: {
+        start: { line: 7, character: 4 },
+        end: { line: 7, character: 9 }
+      },
+      tokenType: 'class'
+    },
+    {
+      range: {
+        start: { line: 8, character: 4 },
+        end: { line: 8, character: 8 }
+      },
+      tokenType: 'parameter'
+    },
+    {
+      range: {
+        start: { line: 8, character: 11 },
+        end: { line: 8, character: 17 }
+      },
+      tokenType: 'enumMember'
+    }
+  ]);
+});
+
+test('SemanticTokens classify class/form identity, properties, types, events, and skip designer text', () => {
+  const project = buildVbaProject(
+    [
+      {
+        uri: 'file:///project/Customer.cls',
+        text: [
+          'VERSION 1.0 CLASS',
+          'Attribute VB_Name = "Customer"',
+          'Option Explicit',
+          '',
+          'Public Event Completed()',
+          '',
+          'Public Type CustomerRecord',
+          '    Id As Long',
+          'End Type',
+          '',
+          'Public Property Get DisplayName() As String',
+          'End Property',
+          '',
+          'Public Sub Run(ByVal record As CustomerRecord)',
+          '    Dim target As Range',
+          '    RaiseEvent Completed',
+          '    DisplayName',
+          '    target.Address',
+          '    unresolved = "Completed DisplayName"',
+          "' DisplayName",
+          'End Sub'
+        ].join('\n')
+      },
+      {
+        uri: 'file:///project/SampleForm.frm',
+        text: [
+          'VERSION 5.00',
+          'Begin VB.Form SampleForm',
+          '   Caption = "Run"',
+          'End',
+          'Attribute VB_Name = "SampleForm"',
+          'Option Explicit',
+          '',
+          'Public Sub Run()',
+          'End Sub'
+        ].join('\n')
+      }
+    ],
+    {
+      hostDefinitions: [
+        {
+          name: 'Range',
+          kind: 'class',
+          members: [
+            { name: 'Address', kind: 'property' }
+          ]
+        }
+      ]
+    }
+  );
+
+  const class_tokens = getSemanticTokens(project, 'file:///project/Customer.cls');
+  const form_tokens = getSemanticTokens(project, 'file:///project/SampleForm.frm');
+
+  assertSemanticToken(class_tokens, 1, 21, 29, 'class');
+  assertSemanticToken(class_tokens, 4, 13, 22, 'event');
+  assertSemanticToken(class_tokens, 6, 12, 26, 'type');
+  assertSemanticToken(class_tokens, 10, 20, 31, 'property');
+  assertSemanticToken(class_tokens, 13, 11, 14, 'function');
+  assertSemanticToken(class_tokens, 13, 21, 27, 'parameter');
+  assertSemanticToken(class_tokens, 13, 31, 45, 'type');
+  assertSemanticToken(class_tokens, 14, 8, 14, 'variable');
+  assertSemanticToken(class_tokens, 14, 18, 23, 'class');
+  assertSemanticToken(class_tokens, 15, 15, 24, 'event');
+  assertSemanticToken(class_tokens, 16, 4, 15, 'property');
+  assertSemanticToken(class_tokens, 17, 4, 10, 'variable');
+  assertSemanticToken(class_tokens, 17, 11, 18, 'property');
+  assertNoSemanticTokensOnLine(class_tokens, 18);
+  assertNoSemanticTokensOnLine(class_tokens, 19);
+
+  assertSemanticToken(form_tokens, 4, 21, 31, 'class');
+  assertSemanticToken(form_tokens, 7, 11, 14, 'function');
+  assert.ok(
+    form_tokens.every((token) => token.range.start.line >= 4),
+    'FormDesignerBlock lines before Attribute VB_Name must not produce semantic tokens'
+  );
+});
+
+function assertSemanticToken(
+  tokens: ReturnType<typeof getSemanticTokens>,
+  line: number,
+  startCharacter: number,
+  endCharacter: number,
+  tokenType: ReturnType<typeof getSemanticTokens>[number]['tokenType']
+): void {
+  assert.ok(
+    tokens.some((token) =>
+      token.range.start.line === line
+        && token.range.start.character === startCharacter
+        && token.range.end.line === line
+        && token.range.end.character === endCharacter
+        && token.tokenType === tokenType
+    ),
+    `Expected ${tokenType} token at ${line}:${startCharacter}-${endCharacter}`
+  );
+}
+
+function assertNoSemanticTokensOnLine(tokens: ReturnType<typeof getSemanticTokens>, line: number): void {
+  assert.equal(
+    tokens.some((token) => token.range.start.line === line),
+    false,
+    `Expected no semantic tokens on line ${line}`
+  );
+}

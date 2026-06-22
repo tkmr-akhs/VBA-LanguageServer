@@ -3,37 +3,41 @@ import type { HostDefinition } from './vbaProject';
 const bundledExcelHostDefinitions: HostDefinition[] = [
   {
     name: 'Application',
+    kind: 'class',
     documentation: 'Represents the Microsoft Excel application.',
     members: [
-      { name: 'ActiveWorkbook', documentation: 'Returns the active workbook.' },
-      { name: 'ActiveSheet', documentation: 'Returns the active sheet.' },
-      { name: 'Workbooks', documentation: 'Returns the Workbooks collection.' }
+      { name: 'ActiveWorkbook', kind: 'property', documentation: 'Returns the active workbook.' },
+      { name: 'ActiveSheet', kind: 'property', documentation: 'Returns the active sheet.' },
+      { name: 'Workbooks', kind: 'property', documentation: 'Returns the Workbooks collection.' }
     ]
   },
   {
     name: 'Workbook',
+    kind: 'class',
     documentation: 'Represents an Excel workbook.',
     members: [
-      { name: 'Name', documentation: 'Returns the workbook name.' },
-      { name: 'Worksheets', documentation: 'Returns the Worksheets collection.' }
+      { name: 'Name', kind: 'property', documentation: 'Returns the workbook name.' },
+      { name: 'Worksheets', kind: 'property', documentation: 'Returns the Worksheets collection.' }
     ]
   },
   {
     name: 'Worksheet',
+    kind: 'class',
     documentation: 'Represents an Excel worksheet.',
     members: [
-      { name: 'Name', documentation: 'Returns the worksheet name.' },
-      { name: 'Range', documentation: 'Returns a Range object.' },
-      { name: 'Cells', documentation: 'Returns the Cells collection.' }
+      { name: 'Name', kind: 'property', documentation: 'Returns the worksheet name.' },
+      { name: 'Range', kind: 'function', documentation: 'Returns a Range object.' },
+      { name: 'Cells', kind: 'property', documentation: 'Returns the Cells collection.' }
     ]
   },
   {
     name: 'Range',
+    kind: 'class',
     documentation: 'Represents a cell, row, column, selection, or block of cells.',
     members: [
-      { name: 'Address', documentation: 'Returns the range address.' },
-      { name: 'Value', documentation: 'Returns or sets the range value.' },
-      { name: 'Value2', documentation: 'Returns or sets the range value without Currency and Date data types.' }
+      { name: 'Address', kind: 'property', documentation: 'Returns the range address.' },
+      { name: 'Value', kind: 'property', documentation: 'Returns or sets the range value.' },
+      { name: 'Value2', kind: 'property', documentation: 'Returns or sets the range value without Currency and Date data types.' }
     ]
   }
 ];

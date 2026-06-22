@@ -30,6 +30,13 @@
         "configuration": "./language-configuration.json"
       }
     ],
+    "grammars": [
+      {
+        "language": "vba",
+        "scopeName": "source.vba",
+        "path": "./syntaxes/vba.tmLanguage.json"
+      }
+    ],
     "configuration": {
       "title": "VBA Language Server",
       "properties": {

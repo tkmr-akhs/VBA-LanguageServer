@@ -112,19 +112,21 @@ try {
   $workbook = $excel.Workbooks.Add()
   $worksheet = $workbook.Worksheets.Item(1)
   $range = $worksheet.Range('A1')
-  function Convert-HostDefinition([string]$Name, $Object, [string]$Documentation) {
+  function Convert-HostDefinition([string]$Name, $Object, [string]$Documentation, [string]$Kind) {
     $members = $Object |
       Get-Member -MemberType Method,Property |
-      Select-Object -ExpandProperty Name -Unique |
-      Sort-Object |
-      ForEach-Object { @{ name = $_; documentation = 'Excel COM member.' } }
-    @{ name = $Name; documentation = $Documentation; members = @($members) }
+      Sort-Object Name -Unique |
+      ForEach-Object {
+        $memberKind = if ($_.MemberType -eq 'Method') { 'function' } else { 'property' }
+        @{ name = $_.Name; kind = $memberKind; documentation = 'Excel COM member.' }
+      }
+    @{ name = $Name; kind = $Kind; documentation = $Documentation; members = @($members) }
   }
   @(
-    Convert-HostDefinition 'Application' $excel 'Represents the installed Microsoft Excel application.'
-    Convert-HostDefinition 'Workbook' $workbook 'Represents an Excel workbook from the installed Excel COM object model.'
-    Convert-HostDefinition 'Worksheet' $worksheet 'Represents an Excel worksheet from the installed Excel COM object model.'
-    Convert-HostDefinition 'Range' $range 'Represents an Excel range from the installed Excel COM object model.'
+    Convert-HostDefinition 'Application' $excel 'Represents the installed Microsoft Excel application.' 'class'
+    Convert-HostDefinition 'Workbook' $workbook 'Represents an Excel workbook from the installed Excel COM object model.' 'class'
+    Convert-HostDefinition 'Worksheet' $worksheet 'Represents an Excel worksheet from the installed Excel COM object model.' 'class'
+    Convert-HostDefinition 'Range' $range 'Represents an Excel range from the installed Excel COM object model.' 'class'
   ) | ConvertTo-Json -Depth 5 -Compress
 } finally {
   if ($workbook -ne $null) {
@@ -175,6 +177,15 @@ function isHostDefinition(value: unknown): value is HostDefinition {
 
   const candidate = value as Partial<HostDefinition>;
   return typeof candidate.name === 'string'
+    && (candidate.kind === undefined || isHostDefinitionKind(candidate.kind))
     && (candidate.documentation === undefined || typeof candidate.documentation === 'string')
     && (candidate.members === undefined || isHostDefinitionArray(candidate.members));
+}
+
+function isHostDefinitionKind(value: unknown): boolean {
+  return value === 'class'
+    || value === 'property'
+    || value === 'function'
+    || value === 'enum'
+    || value === 'enumMember';
 }

@@ -19,6 +19,7 @@ export interface VbaProjectFile {
 
 export interface CompletionEntry {
   label: string;
+  kind: CompletionEntryKind;
 }
 
 export interface CompletionRequest {
@@ -26,8 +27,23 @@ export interface CompletionRequest {
   position: SourcePosition;
 }
 
+export type CompletionEntryKind =
+  | 'class'
+  | 'enum'
+  | 'enumMember'
+  | 'event'
+  | 'function'
+  | 'namespace'
+  | 'parameter'
+  | 'property'
+  | 'type'
+  | 'variable';
+
+export type HostDefinitionKind = 'class' | 'property' | 'function' | 'enum' | 'enumMember';
+
 export interface HostDefinition {
   name: string;
+  kind?: HostDefinitionKind;
   documentation?: string;
   members?: HostDefinition[];
 }
@@ -72,6 +88,36 @@ export interface SignatureHelpResult {
     documentation?: string;
   }>;
 }
+
+export type SemanticTokenType =
+  | 'namespace'
+  | 'class'
+  | 'function'
+  | 'property'
+  | 'variable'
+  | 'parameter'
+  | 'enum'
+  | 'enumMember'
+  | 'type'
+  | 'event';
+
+export interface VbaSemanticToken {
+  range: SourceRange;
+  tokenType: SemanticTokenType;
+}
+
+export const VBA_SEMANTIC_TOKEN_TYPES: SemanticTokenType[] = [
+  'namespace',
+  'class',
+  'function',
+  'property',
+  'variable',
+  'parameter',
+  'enum',
+  'enumMember',
+  'type',
+  'event'
+];
 
 export type NameResolutionResult =
   | {
@@ -135,10 +181,15 @@ interface WithEventsDeclaration {
   typeName: string;
 }
 
+type VbaModuleKind = 'standard' | 'class' | 'form';
+
 interface VbaModule {
   uri: string;
   folderUri: string;
   identity: string;
+  identityRange?: SourceRange;
+  kind: VbaModuleKind;
+  codeStartLine: number;
   lines: string[];
   definitions: VbaDefinition[];
   procedureScopes: ProcedureScope[];
@@ -219,10 +270,16 @@ export function getCompletions(project: VbaProject, request: CompletionRequest):
     .flatMap((module) => module.definitions)
     .filter((definition) => definition.visibility === 'public')
     .filter((definition) => prefix === '' || definition.name.toLowerCase().startsWith(prefix))
-    .map((definition) => ({ label: definition.name }));
+    .map((definition) => ({
+      label: definition.name,
+      kind: completionKindForVbaDefinition(definition)
+    }));
   const host_candidates = project.hostDefinitions
     .filter((definition) => prefix === '' || definition.name.toLowerCase().startsWith(prefix))
-    .map((definition) => ({ label: definition.name }));
+    .map((definition) => ({
+      label: definition.name,
+      kind: completionKindForHostDefinition(definition)
+    }));
 
   return uniqueCompletionEntries([...project_candidates, ...host_candidates]);
 }
@@ -241,7 +298,10 @@ function getTypedMemberCompletions(
   const prefix = request.prefix.toLowerCase();
   return getMembersForType(project, currentModule, type_name)
     .filter((member) => prefix === '' || member.name.toLowerCase().startsWith(prefix))
-    .map((member) => ({ label: member.name }));
+    .map((member) => ({
+      label: member.name,
+      kind: member.kind
+    }));
 }
 
 export function getModuleIdentities(project: VbaProject): string[] {
@@ -286,6 +346,47 @@ export function getHover(project: VbaProject, request: CompletionRequest): Hover
   return {
     contents: renderDocumentationComment(documentation)
   };
+}
+
+export function getSemanticTokens(project: VbaProject, uri: string): VbaSemanticToken[] {
+  const current_module = findModule(project, uri);
+  if (current_module === undefined) {
+    return [];
+  }
+
+  const tokens: VbaSemanticToken[] = [];
+  if (current_module.identityRange !== undefined) {
+    tokens.push({
+      range: current_module.identityRange,
+      tokenType: current_module.kind === 'standard' ? 'namespace' : 'class'
+    });
+  }
+
+  for (let line_index = current_module.codeStartLine; line_index < current_module.lines.length; line_index += 1) {
+    for (const range of getIdentifierRangesInCode(current_module.lines[line_index], line_index)) {
+      const resolution = resolveName(project, {
+        uri,
+        position: range.start
+      });
+      if (resolution === undefined) {
+        continue;
+      }
+
+      const token_type = resolution.source === 'host'
+        ? semanticTokenTypeForHostDefinition(resolution.definition)
+        : semanticTokenTypeForVbaLocation(project, resolution.definition);
+      if (token_type === undefined) {
+        continue;
+      }
+
+      tokens.push({
+        range,
+        tokenType: token_type
+      });
+    }
+  }
+
+  return uniqueSemanticTokens(tokens).sort(compareSemanticTokens);
 }
 
 function uniqueCompletionEntries(entries: CompletionEntry[]): CompletionEntry[] {
@@ -433,7 +534,13 @@ export function resolveName(
       return toVbaResolution(qualified_definition);
     }
 
-    return undefined;
+    return resolveTypedMemberDefinition(
+      project,
+      current_module,
+      request.position,
+      qualified_reference.qualifier,
+      qualified_reference.member
+    );
   }
 
   const local_definition = resolveLocalDefinition(current_module, request.position, identifier);
@@ -549,6 +656,37 @@ function resolveQualifiedModuleDefinition(
   return singleMatch(matches);
 }
 
+function resolveTypedMemberDefinition(
+  project: VbaProject,
+  current_module: VbaModule,
+  position: SourcePosition,
+  qualifier: string,
+  member: string
+): NameResolutionResult | undefined {
+  const type_name = findTypeNameForExpression(project, current_module, position, qualifier);
+  if (type_name === undefined) {
+    return undefined;
+  }
+
+  const host_type = project.hostDefinitions.find((definition) => sameName(definition.name, type_name));
+  const host_member = singleMatch(host_type?.members?.filter((definition) => sameName(definition.name, member)) ?? []);
+  if (host_member !== undefined) {
+    return {
+      source: 'host',
+      definition: host_member
+    };
+  }
+
+  const project_type = project.modules.find((module) =>
+    module.folderUri.toLowerCase() === current_module.folderUri.toLowerCase()
+      && sameName(module.identity, type_name)
+  );
+  const project_member = singleMatch(project_type?.definitions
+    .filter((definition) => definition.visibility === 'public')
+    .filter((definition) => sameName(definition.name, member)) ?? []);
+  return project_member === undefined ? undefined : toVbaResolution(project_member);
+}
+
 function resolveLocalDefinition(
   module: VbaModule,
   position: SourcePosition,
@@ -564,13 +702,18 @@ function resolveLocalDefinition(
 
 function parseModule(file: VbaProjectFile): VbaModule {
   const lines = file.text.split(/\r?\n/);
-  const identity = parseModuleIdentity(lines) ?? fallbackModuleIdentity(file.uri);
-  const parsed_members = parseModuleMembers(file.uri, lines, getCodeStartLine(file.uri, lines));
+  const parsed_identity = parseModuleIdentity(lines);
+  const identity = parsed_identity?.name ?? fallbackModuleIdentity(file.uri);
+  const code_start_line = getCodeStartLine(file.uri, lines);
+  const parsed_members = parseModuleMembers(file.uri, lines, code_start_line);
 
   return {
     uri: file.uri,
     folderUri: getFolderUri(file.uri),
     identity,
+    identityRange: parsed_identity?.range,
+    kind: getModuleKind(file.uri),
+    codeStartLine: code_start_line,
     lines,
     definitions: parsed_members.definitions,
     procedureScopes: parsed_members.procedureScopes,
@@ -580,11 +723,20 @@ function parseModule(file: VbaProjectFile): VbaModule {
   };
 }
 
-function parseModuleIdentity(lines: string[]): string | undefined {
-  for (const line of lines) {
+function parseModuleIdentity(lines: string[]): { name: string; range: SourceRange } | undefined {
+  for (let line_index = 0; line_index < lines.length; line_index += 1) {
+    const line = lines[line_index];
     const match = /^\s*Attribute\s+VB_Name\s*=\s*"([^"]+)"/i.exec(line);
     if (match !== null) {
-      return match[1];
+      const name = match[1];
+      const name_start = line.indexOf('"') + 1;
+      return {
+        name,
+        range: {
+          start: { line: line_index, character: name_start },
+          end: { line: line_index, character: name_start + name.length }
+        }
+      };
     }
   }
 
@@ -1142,10 +1294,13 @@ function getMembersForType(
   project: VbaProject,
   currentModule: VbaModule,
   typeName: string
-): { name: string }[] {
+): { name: string; kind: CompletionEntryKind }[] {
   const host_type = project.hostDefinitions.find((definition) => sameName(definition.name, typeName));
   if (host_type?.members !== undefined) {
-    return host_type.members;
+    return host_type.members.map((member) => ({
+      name: member.name,
+      kind: completionKindForHostDefinition(member)
+    }));
   }
 
   const project_type = project.modules.find((module) =>
@@ -1155,7 +1310,10 @@ function getMembersForType(
   if (project_type !== undefined) {
     return project_type.definitions
       .filter((definition) => definition.visibility === 'public')
-      .map((definition) => ({ name: definition.name }));
+      .map((definition) => ({
+        name: definition.name,
+        kind: completionKindForVbaDefinition(definition)
+      }));
   }
 
   return [];
@@ -1355,13 +1513,20 @@ function findDefinitionByLocation(
   project: VbaProject,
   location: DefinitionLocation
 ): VbaDefinition | undefined {
-  return project.modules
-    .flatMap((module) => module.definitions)
+  return getAllVbaDefinitions(project)
     .find((definition) =>
       sameUri(definition.uri, location.uri)
         && comparePosition(definition.range.start, location.range.start) === 0
         && comparePosition(definition.range.end, location.range.end) === 0
     );
+}
+
+function getAllVbaDefinitions(project: VbaProject): VbaDefinition[] {
+  return project.modules.flatMap((module) => [
+    ...module.definitions,
+    ...module.definitions.flatMap((definition) => definition.children ?? []),
+    ...module.procedureScopes.flatMap((scope) => scope.definitions)
+  ]);
 }
 
 function findDocumentationForDefinition(
@@ -1482,4 +1647,103 @@ function comparePosition(left: SourcePosition, right: SourcePosition): number {
   }
 
   return left.character - right.character;
+}
+
+function getModuleKind(uri: string): VbaModuleKind {
+  if (/\.bas$/i.test(uriPathname(uri))) {
+    return 'standard';
+  }
+  if (/\.frm$/i.test(uriPathname(uri))) {
+    return 'form';
+  }
+
+  return 'class';
+}
+
+function completionKindForVbaDefinition(definition: VbaDefinition): CompletionEntryKind {
+  const token_type = semanticTokenTypeForVbaDefinition(definition);
+  return token_type === undefined ? 'variable' : token_type;
+}
+
+function completionKindForHostDefinition(definition: HostDefinition): CompletionEntryKind {
+  return semanticTokenTypeForHostDefinition(definition);
+}
+
+function semanticTokenTypeForVbaLocation(
+  project: VbaProject,
+  location: DefinitionLocation
+): SemanticTokenType | undefined {
+  const definition = findDefinitionByLocation(project, location);
+  return definition === undefined ? undefined : semanticTokenTypeForVbaDefinition(definition);
+}
+
+function semanticTokenTypeForVbaDefinition(definition: VbaDefinition): SemanticTokenType | undefined {
+  switch (definition.kind) {
+    case 'sub':
+    case 'function':
+      return 'function';
+    case 'property':
+    case 'typeField':
+      return 'property';
+    case 'local':
+      return 'variable';
+    case 'parameter':
+      return 'parameter';
+    case 'enum':
+      return 'enum';
+    case 'enumMember':
+      return 'enumMember';
+    case 'type':
+      return 'type';
+    case 'event':
+      return 'event';
+    default:
+      return undefined;
+  }
+}
+
+function semanticTokenTypeForHostDefinition(definition: HostDefinition): SemanticTokenType {
+  switch (definition.kind) {
+    case 'function':
+      return 'function';
+    case 'property':
+      return 'property';
+    case 'enum':
+      return 'enum';
+    case 'enumMember':
+      return 'enumMember';
+    case 'class':
+      return 'class';
+    default:
+      return definition.members === undefined ? 'property' : 'class';
+  }
+}
+
+function uniqueSemanticTokens(tokens: VbaSemanticToken[]): VbaSemanticToken[] {
+  const seen_ranges = new Set<string>();
+  const unique_tokens: VbaSemanticToken[] = [];
+
+  for (const token of tokens) {
+    const key = [
+      token.range.start.line,
+      token.range.start.character,
+      token.range.end.line,
+      token.range.end.character,
+      token.tokenType
+    ].join(':');
+    if (seen_ranges.has(key)) {
+      continue;
+    }
+
+    seen_ranges.add(key);
+    unique_tokens.push(token);
+  }
+
+  return unique_tokens;
+}
+
+function compareSemanticTokens(left: VbaSemanticToken, right: VbaSemanticToken): number {
+  return comparePosition(left.range.start, right.range.start)
+    || comparePosition(left.range.end, right.range.end)
+    || left.tokenType.localeCompare(right.tokenType);
 }

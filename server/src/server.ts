@@ -27,14 +27,18 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createDefaultHostCatalogManager } from './hostCatalogService';
 import {
   buildVbaProject,
+  CompletionEntryKind,
   getCompletions,
   getDefinition,
   getHover,
   getRenameEdits,
   getRenameTarget,
+  getSemanticTokens,
   getSignatureHelp,
   RenameEdit,
   SourceRange,
+  VBA_SEMANTIC_TOKEN_TYPES,
+  VbaSemanticToken,
   VbaProjectFile
 } from './vbaProject';
 
@@ -58,6 +62,13 @@ connection.onInitialize((_params: InitializeParams): InitializeResult => {
       },
       signatureHelpProvider: {
         triggerCharacters: ['(', ',']
+      },
+      semanticTokensProvider: {
+        legend: {
+          tokenTypes: [...VBA_SEMANTIC_TOKEN_TYPES],
+          tokenModifiers: []
+        },
+        full: true
       }
     }
   };
@@ -93,8 +104,18 @@ connection.onCompletion((params): CompletionItem[] => {
     position: params.position
   }).map((item) => ({
     label: item.label,
-    kind: CompletionItemKind.Function
+    kind: toLspCompletionItemKind(item.kind)
   }));
+});
+
+connection.languages.semanticTokens.on((params) => {
+  const document = documents.get(params.textDocument.uri);
+  if (document === undefined) {
+    return { data: [] };
+  }
+
+  const project = buildProjectForDocument(document);
+  return encodeSemanticTokens(getSemanticTokens(project, document.uri));
 });
 
 connection.onDefinition((params): Definition | undefined => {
@@ -266,4 +287,59 @@ function toWorkspaceEdit(edits: RenameEdit[]): WorkspaceEdit {
   }
 
   return { changes };
+}
+
+function toLspCompletionItemKind(kind: CompletionEntryKind): CompletionItemKind {
+  switch (kind) {
+    case 'class':
+      return CompletionItemKind.Class;
+    case 'enum':
+      return CompletionItemKind.Enum;
+    case 'enumMember':
+      return CompletionItemKind.EnumMember;
+    case 'event':
+      return CompletionItemKind.Event;
+    case 'namespace':
+      return CompletionItemKind.Module;
+    case 'parameter':
+      return CompletionItemKind.Variable;
+    case 'property':
+      return CompletionItemKind.Property;
+    case 'type':
+      return CompletionItemKind.Struct;
+    case 'variable':
+      return CompletionItemKind.Variable;
+    case 'function':
+    default:
+      return CompletionItemKind.Function;
+  }
+}
+
+function encodeSemanticTokens(tokens: VbaSemanticToken[]): { data: number[] } {
+  const data: number[] = [];
+  let previous_line = 0;
+  let previous_character = 0;
+
+  for (const token of tokens) {
+    const token_type = VBA_SEMANTIC_TOKEN_TYPES.indexOf(token.tokenType);
+    if (token_type === -1) {
+      continue;
+    }
+
+    const line_delta = token.range.start.line - previous_line;
+    const character_delta = line_delta === 0
+      ? token.range.start.character - previous_character
+      : token.range.start.character;
+    data.push(
+      line_delta,
+      character_delta,
+      token.range.end.character - token.range.start.character,
+      token_type,
+      0
+    );
+    previous_line = token.range.start.line;
+    previous_character = token.range.start.character;
+  }
+
+  return { data };
 }

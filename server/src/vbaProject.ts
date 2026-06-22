@@ -49,10 +49,20 @@ export type NameResolutionResult =
 
 interface VbaDefinition {
   name: string;
-  kind: 'function' | 'sub' | 'property' | 'local' | 'parameter';
+  kind:
+    | 'function'
+    | 'sub'
+    | 'property'
+    | 'enum'
+    | 'enumMember'
+    | 'type'
+    | 'typeField'
+    | 'local'
+    | 'parameter';
   visibility: 'public' | 'private' | 'local';
   uri: string;
   range: SourceRange;
+  children?: VbaDefinition[];
 }
 
 interface ProcedureScope {
@@ -109,6 +119,17 @@ export function getCompletions(project: VbaProject, request: CompletionRequest):
 
 export function getModuleIdentities(project: VbaProject): string[] {
   return project.modules.map((module) => module.identity);
+}
+
+export function getTypeFields(project: VbaProject, typeName: string): { name: string; range: SourceRange }[] {
+  const type_definition = project.modules
+    .flatMap((module) => module.definitions)
+    .find((definition) => definition.kind === 'type' && sameName(definition.name, typeName));
+
+  return type_definition?.children?.map((field) => ({
+    name: field.name,
+    range: field.range
+  })) ?? [];
 }
 
 export function getDefinition(
@@ -258,6 +279,49 @@ function parseModuleMembers(
 
   for (let line_index = start_line; line_index < lines.length; line_index += 1) {
     const line = lines[line_index];
+    const enum_match = /^\s*(?:(Public|Private)\s+)?Enum\s+([A-Za-z_][A-Za-z0-9_]*)\b/i.exec(line);
+    if (enum_match !== null) {
+      const visibility = (enum_match[1]?.toLowerCase() ?? 'public') as 'public' | 'private';
+      const name = enum_match[2];
+      const name_start = line.indexOf(name);
+      definitions.push({
+        name,
+        kind: 'enum',
+        visibility,
+        uri,
+        range: {
+          start: { line: line_index, character: name_start },
+          end: { line: line_index, character: name_start + name.length }
+        }
+      });
+
+      const end_line_index = findBlockEndLine(lines, line_index + 1, 'enum');
+      definitions.push(...parseEnumMemberDefinitions(uri, lines, line_index + 1, end_line_index, visibility));
+      line_index = end_line_index;
+      continue;
+    }
+
+    const type_match = /^\s*(?:(Public|Private)\s+)?Type\s+([A-Za-z_][A-Za-z0-9_]*)\b/i.exec(line);
+    if (type_match !== null) {
+      const visibility = (type_match[1]?.toLowerCase() ?? 'public') as 'public' | 'private';
+      const name = type_match[2];
+      const name_start = line.indexOf(name);
+      const end_line_index = findBlockEndLine(lines, line_index + 1, 'type');
+      definitions.push({
+        name,
+        kind: 'type',
+        visibility,
+        uri,
+        range: {
+          start: { line: line_index, character: name_start },
+          end: { line: line_index, character: name_start + name.length }
+        },
+        children: parseTypeFieldDefinitions(uri, lines, line_index + 1, end_line_index, visibility)
+      });
+      line_index = end_line_index;
+      continue;
+    }
+
     const procedure_match =
       /^\s*(?:(Public|Private)\s+)?(?:(Sub|Function)|Property\s+(Get|Let|Set))\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(([^)]*)\))?/i.exec(line);
     if (procedure_match === null) {
@@ -302,6 +366,82 @@ function parseModuleMembers(
   }
 
   return { definitions, procedureScopes };
+}
+
+function parseEnumMemberDefinitions(
+  uri: string,
+  lines: string[],
+  start_line: number,
+  end_line: number,
+  visibility: 'public' | 'private'
+): VbaDefinition[] {
+  const definitions: VbaDefinition[] = [];
+
+  for (let line_index = start_line; line_index < end_line; line_index += 1) {
+    const line = lines[line_index];
+    const member_match = /^\s*([A-Za-z_][A-Za-z0-9_]*)\b/i.exec(line);
+    if (member_match === null) {
+      continue;
+    }
+
+    const name = member_match[1];
+    const name_start = line.indexOf(name);
+    definitions.push({
+      name,
+      kind: 'enumMember',
+      visibility,
+      uri,
+      range: {
+        start: { line: line_index, character: name_start },
+        end: { line: line_index, character: name_start + name.length }
+      }
+    });
+  }
+
+  return definitions;
+}
+
+function parseTypeFieldDefinitions(
+  uri: string,
+  lines: string[],
+  start_line: number,
+  end_line: number,
+  visibility: 'public' | 'private'
+): VbaDefinition[] {
+  const definitions: VbaDefinition[] = [];
+
+  for (let line_index = start_line; line_index < end_line; line_index += 1) {
+    const line = lines[line_index];
+    const field_match = /^\s*([A-Za-z_][A-Za-z0-9_]*)\b/i.exec(line);
+    if (field_match === null) {
+      continue;
+    }
+
+    const name = field_match[1];
+    const name_start = line.indexOf(name);
+    definitions.push({
+      name,
+      kind: 'typeField',
+      visibility,
+      uri,
+      range: {
+        start: { line: line_index, character: name_start },
+        end: { line: line_index, character: name_start + name.length }
+      }
+    });
+  }
+
+  return definitions;
+}
+
+function findBlockEndLine(lines: string[], start_line: number, block_kind: 'enum' | 'type'): number {
+  for (let line_index = start_line; line_index < lines.length; line_index += 1) {
+    if (new RegExp(`^\\s*End\\s+${block_kind}\\b`, 'i').test(lines[line_index])) {
+      return line_index;
+    }
+  }
+
+  return Math.max(start_line - 1, 0);
 }
 
 function getCodeStartLine(uri: string, lines: string[]): number {

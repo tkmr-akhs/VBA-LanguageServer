@@ -49,6 +49,7 @@
   },
   "scripts": {
     "compile": "tsc -b",
+    "test": "npm run compile && node server/out/testRunner.js",
     "watch": "tsc -b -w",
     "vscode:prepublish": "npm run compile",
     "package": "vsce package"

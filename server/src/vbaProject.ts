@@ -57,6 +57,7 @@ interface VbaDefinition {
     | 'enumMember'
     | 'type'
     | 'typeField'
+    | 'event'
     | 'local'
     | 'parameter';
   visibility: 'public' | 'private' | 'local';
@@ -70,6 +71,11 @@ interface ProcedureScope {
   definitions: VbaDefinition[];
 }
 
+interface WithEventsDeclaration {
+  name: string;
+  typeName: string;
+}
+
 interface VbaModule {
   uri: string;
   folderUri: string;
@@ -77,6 +83,7 @@ interface VbaModule {
   lines: string[];
   definitions: VbaDefinition[];
   procedureScopes: ProcedureScope[];
+  withEventsDeclarations: WithEventsDeclaration[];
 }
 
 export interface VbaProject {
@@ -174,6 +181,14 @@ export function resolveName(
     return toVbaResolution(local_definition);
   }
 
+  const event_handler_definition = resolveWithEventsHandlerDefinition(project, current_module, identifier);
+  if (event_handler_definition !== undefined) {
+    return toVbaResolution(event_handler_definition);
+  }
+  if (isWithEventsHandlerName(current_module, identifier)) {
+    return undefined;
+  }
+
   const current_module_matches = current_module.definitions.filter((definition) =>
     sameName(definition.name, identifier)
   );
@@ -204,6 +219,50 @@ export function resolveName(
       source: 'host',
       definition: host_definition
     };
+  }
+
+  return undefined;
+}
+
+function isWithEventsHandlerName(module: VbaModule, identifier: string): boolean {
+  return module.withEventsDeclarations.some((declaration) =>
+    identifier.toLowerCase().startsWith(`${declaration.name}_`.toLowerCase())
+  );
+}
+
+function resolveWithEventsHandlerDefinition(
+  project: VbaProject,
+  current_module: VbaModule,
+  identifier: string
+): VbaDefinition | undefined {
+  for (const declaration of current_module.withEventsDeclarations) {
+    const handler_prefix = `${declaration.name}_`;
+    if (!identifier.toLowerCase().startsWith(handler_prefix.toLowerCase())) {
+      continue;
+    }
+
+    const event_name = identifier.slice(handler_prefix.length);
+    if (event_name === '') {
+      continue;
+    }
+
+    const event_source_module = project.modules.find((module) =>
+      module.folderUri.toLowerCase() === current_module.folderUri.toLowerCase()
+        && sameName(module.identity, declaration.typeName)
+    );
+    if (event_source_module === undefined) {
+      continue;
+    }
+
+    const matches = event_source_module.definitions
+      .filter((definition) => definition.kind === 'event')
+      .filter((definition) => definition.visibility === 'public')
+      .filter((definition) => sameName(definition.name, event_name));
+
+    const event_definition = singleMatch(matches);
+    if (event_definition !== undefined) {
+      return event_definition;
+    }
   }
 
   return undefined;
@@ -254,7 +313,8 @@ function parseModule(file: VbaProjectFile): VbaModule {
     identity,
     lines,
     definitions: parsed_members.definitions,
-    procedureScopes: parsed_members.procedureScopes
+    procedureScopes: parsed_members.procedureScopes,
+    withEventsDeclarations: parsed_members.withEventsDeclarations
   };
 }
 
@@ -273,12 +333,45 @@ function parseModuleMembers(
   uri: string,
   lines: string[],
   start_line: number
-): { definitions: VbaDefinition[]; procedureScopes: ProcedureScope[] } {
+): {
+  definitions: VbaDefinition[];
+  procedureScopes: ProcedureScope[];
+  withEventsDeclarations: WithEventsDeclaration[];
+} {
   const definitions: VbaDefinition[] = [];
   const procedureScopes: ProcedureScope[] = [];
+  const withEventsDeclarations: WithEventsDeclaration[] = [];
 
   for (let line_index = start_line; line_index < lines.length; line_index += 1) {
     const line = lines[line_index];
+    const with_events_match =
+      /^\s*(?:(?:Public|Private|Dim)\s+)?WithEvents\s+([A-Za-z_][A-Za-z0-9_]*)\s+As\s+([A-Za-z_][A-Za-z0-9_]*)\b/i.exec(line);
+    if (with_events_match !== null) {
+      withEventsDeclarations.push({
+        name: with_events_match[1],
+        typeName: with_events_match[2]
+      });
+      continue;
+    }
+
+    const event_match = /^\s*(?:(Public|Private)\s+)?Event\s+([A-Za-z_][A-Za-z0-9_]*)\b/i.exec(line);
+    if (event_match !== null) {
+      const visibility = (event_match[1]?.toLowerCase() ?? 'public') as 'public' | 'private';
+      const name = event_match[2];
+      const name_start = line.indexOf(name);
+      definitions.push({
+        name,
+        kind: 'event',
+        visibility,
+        uri,
+        range: {
+          start: { line: line_index, character: name_start },
+          end: { line: line_index, character: name_start + name.length }
+        }
+      });
+      continue;
+    }
+
     const enum_match = /^\s*(?:(Public|Private)\s+)?Enum\s+([A-Za-z_][A-Za-z0-9_]*)\b/i.exec(line);
     if (enum_match !== null) {
       const visibility = (enum_match[1]?.toLowerCase() ?? 'public') as 'public' | 'private';
@@ -365,7 +458,7 @@ function parseModuleMembers(
     line_index = end_line_index;
   }
 
-  return { definitions, procedureScopes };
+  return { definitions, procedureScopes, withEventsDeclarations };
 }
 
 function parseEnumMemberDefinitions(

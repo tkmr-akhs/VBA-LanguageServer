@@ -757,3 +757,163 @@ test('private enum and type declarations resolve inside the current module only'
     }
   ]);
 });
+
+test('RaiseEvent resolves to an event declaration in the current module', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/TaskRunner.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "TaskRunner"',
+        'Option Explicit',
+        '',
+        'Public Event Completed(ByVal Result As String)',
+        '',
+        'Public Sub Run()',
+        '    RaiseEvent Completed("ok")',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  const definition = getDefinition(project, {
+    uri: 'file:///project/TaskRunner.cls',
+    position: { line: 7, character: 17 }
+  });
+
+  assert.deepEqual(definition, {
+    uri: 'file:///project/TaskRunner.cls',
+    range: {
+      start: { line: 4, character: 13 },
+      end: { line: 4, character: 22 }
+    }
+  });
+});
+
+test('WithEvents handler names resolve to the declared type event', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/FormModule.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "FormModule"',
+        'Option Explicit',
+        '',
+        'Private WithEvents Button As CommandButton',
+        '',
+        'Private Sub Button_Click()',
+        'End Sub'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/CommandButton.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "CommandButton"',
+        'Option Explicit',
+        '',
+        'Public Event Click()'
+      ].join('\n')
+    }
+  ]);
+
+  const definition = getDefinition(project, {
+    uri: 'file:///project/FormModule.cls',
+    position: { line: 6, character: 20 }
+  });
+
+  assert.deepEqual(definition, {
+    uri: 'file:///project/CommandButton.cls',
+    range: {
+      start: { line: 4, character: 13 },
+      end: { line: 4, character: 18 }
+    }
+  });
+});
+
+test('unresolved RaiseEvent and WithEvents handler references return no definition target', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/FormModule.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "FormModule"',
+        'Option Explicit',
+        '',
+        'Private WithEvents Button As CommandButton',
+        '',
+        'Private Sub Run()',
+        '    RaiseEvent Missing',
+        'End Sub',
+        '',
+        'Private Sub Button_Missing()',
+        'End Sub'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/CommandButton.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "CommandButton"',
+        'Option Explicit',
+        '',
+        'Public Event Click()'
+      ].join('\n')
+    }
+  ]);
+
+  const missingRaiseEvent = getDefinition(project, {
+    uri: 'file:///project/FormModule.cls',
+    position: { line: 7, character: 17 }
+  });
+  const missingHandlerEvent = getDefinition(project, {
+    uri: 'file:///project/FormModule.cls',
+    position: { line: 10, character: 20 }
+  });
+
+  assert.equal(missingRaiseEvent, undefined);
+  assert.equal(missingHandlerEvent, undefined);
+});
+
+test('form designer controls are not inferred for WithEvents handler resolution', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/SampleForm.frm',
+      text: [
+        'VERSION 5.00',
+        'Begin VB.Form SampleForm',
+        '   Begin VB.CommandButton Button',
+        '   End',
+        'End',
+        'Attribute VB_Name = "SampleForm"',
+        'Option Explicit',
+        '',
+        'Private Sub Button_Click()',
+        'End Sub'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/CommandButton.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "CommandButton"',
+        'Option Explicit',
+        '',
+        'Public Event Click()'
+      ].join('\n')
+    }
+  ]);
+
+  const definition = getDefinition(project, {
+    uri: 'file:///project/SampleForm.frm',
+    position: { line: 8, character: 20 }
+  });
+
+  assert.notDeepEqual(definition, {
+    uri: 'file:///project/CommandButton.cls',
+    range: {
+      start: { line: 4, character: 13 },
+      end: { line: 4, character: 18 }
+    }
+  });
+});

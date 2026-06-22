@@ -14,8 +14,52 @@ An identifiable declaration in a `VbaProject` that editor features can refer to.
 _Avoid_: symbol, item, thing
 
 **HostDefinition**:
-A definition supplied by the VBA host environment rather than by exported source files in a `VbaProject`. Excel object model members such as workbook, worksheet, and range APIs are `HostDefinition`s.
+A definition supplied by an enabled `HostApplication` rather than by exported source files in a `VbaProject`. Office object model members such as Excel workbook APIs, Word document APIs, PowerPoint presentation APIs, and Access database APIs are `HostDefinition`s, and they retain their originating `HostApplication`.
 _Avoid_: built-in, standard library, external symbol
+
+**HostApplication**:
+An Office application whose object model can supply `HostDefinition`s for a `VbaProject`. Excel, Word, PowerPoint, and Access are separate `HostApplication`s even though they all use VBA.
+_Avoid_: language, runtime, library
+
+**ReferenceLibrary**:
+An external VBA type library that is not a `HostApplication` object model. DAO and ADO are `ReferenceLibrary` candidates rather than part of Access `HostApplication` support.
+_Avoid_: host application, object model
+
+**HostApplicationSelection**:
+The configured set of `HostApplication`s whose `HostDefinition`s are active for a `VbaProject`. It is resolved from the active document's configuration, formed from the `MainHostApplication` plus explicitly enabled additional `HostApplication`s, and defaults to Excel only so existing VBA editor behavior remains stable until another host is explicitly enabled.
+_Avoid_: mode, profile, target language
+
+**MainHostApplication**:
+The configured primary `HostApplication` for a `VbaProject`. It defaults to Excel, is always part of the `HostApplicationSelection`, and represents the Office object model that should feel native for unqualified host references when more than one `HostApplication` is available.
+_Avoid_: active application, default library, preferred host
+
+**SyntaxHighlighting**:
+Editor coloring for VBA source text. It combines lexical classification for VBA syntax with meaning-aware classification from parsed project information when that information is available.
+_Avoid_: color theme, formatting
+
+**SemanticToken**:
+A meaning-aware classification of a source range, derived from parsed `VbaProject` information. `SemanticToken`s refine `SyntaxHighlighting` for declarations and references, using standard editor token categories whenever a VBA meaning can be represented by one.
+_Avoid_: syntax token, text token
+
+**SourceFormatting**:
+Editor-initiated rewriting of VBA source text to match the language server's source style. It includes casing normalization and indentation formatting, while preserving source meaning.
+_Avoid_: syntax highlighting, refactoring
+
+**CasingNormalization**:
+A `SourceFormatting` operation that rewrites VBA keywords and resolvable identifiers to their canonical casing.
+_Avoid_: rename, spelling correction
+
+**LanguageVocabulary**:
+The fixed VBA words whose casing is defined by the language server rather than by a `VbaDefinition` or `HostDefinition`. It includes VBA keywords, intrinsic types, intrinsic constants, and literals.
+_Avoid_: host definition, project definition
+
+**IndentationFormatting**:
+A `SourceFormatting` operation that rewrites leading whitespace according to VBA block structure.
+_Avoid_: alignment, line wrapping
+
+**EndStatementCompletion**:
+An editor completion that inserts the matching VBA block closer for a block opener, such as `End Sub`, `End Function`, or `End If`.
+_Avoid_: automatic typing, on-type edit
 
 **DocumentationComment**:
 A structured Doxygen-style VBA comment block attached to a `VbaDefinition` and shown by editor features such as hover and signature help regardless of public or private visibility. Plain apostrophe comments are not `DocumentationComment`s; when an implementation member has no `DocumentationComment`, it may inherit one from the interface member named by its `Implements` relationship.
@@ -26,7 +70,7 @@ A source-defined `VbaDefinition` that can be renamed inside its `VbaProject`. `H
 _Avoid_: renameable symbol, edit target
 
 **NameResolution**:
-The case-insensitive process of matching an identifier reference to the closest visible `VbaDefinition` or `HostDefinition`. Procedure-local definitions outrank current-module definitions, current-module definitions outrank public project definitions, and project definitions outrank host definitions; ambiguous equal-rank matches do not produce hover or go-to-definition results.
+The case-insensitive process of matching an identifier reference to the closest visible `VbaDefinition` or `HostDefinition`. Procedure-local definitions outrank current-module definitions, current-module definitions outrank public project definitions, and project definitions outrank host definitions, including host qualifier names; among host definitions, a `MainHostApplication` match outranks matches from other enabled `HostApplication`s.
 _Avoid_: lookup, binding, search
 
 **ModuleIdentity**:
@@ -38,7 +82,7 @@ The process of matching an explicit VBA type annotation to a `VbaDefinition` or 
 _Avoid_: type inference, runtime type, guessed type
 
 **QualifiedReference**:
-An identifier reference written with a qualifier, such as `ModuleIdentity.MemberName` or `variable.MemberName`. When the qualifier names a module, class, or form, only public members of that definition are visible from outside that module.
+An identifier reference written with a qualifier, such as `ModuleIdentity.MemberName`, `variable.MemberName`, or `Word.Application`. When the qualifier names a module, class, or form, only public members of that definition are visible from outside that module; when it names an enabled `HostApplication`, only that host's `HostDefinition`s are visible.
 _Avoid_: dotted lookup, member access, qualified symbol
 
 **EventReference**:
@@ -67,8 +111,35 @@ Domain Expert: "Yes. `Enum` and user-defined `Type` declarations are `VbaDefinit
 Dev: "Is an `Event` only a declaration, or can it be referenced?"
 Domain Expert: "An `Event` is a `VbaDefinition`. Event handler procedure names and `RaiseEvent` statements can both refer to it."
 
-Dev: "Where do Excel object model completions come from?"
-Domain Expert: "They are `HostDefinition`s because Excel supplies them, even when the language server stores or discovers their metadata locally."
+Dev: "Where do Office object model completions come from?"
+Domain Expert: "They are `HostDefinition`s supplied by enabled `HostApplication`s, even when the language server stores or discovers their metadata locally."
+
+Dev: "Does enabling Access also enable DAO and ADO completions?"
+Domain Expert: "No. Access contributes its `HostApplication` object model; DAO and ADO are separate `ReferenceLibrary` candidates."
+
+Dev: "If I install support for Word and PowerPoint, do their object models appear automatically?"
+Domain Expert: "No. They appear only when the `HostApplicationSelection` enables those `HostApplication`s; the stable default is Excel only."
+
+Dev: "Which Office object model should unqualified host references feel native to?"
+Domain Expert: "Use the configured `MainHostApplication`; it defaults to Excel."
+
+Dev: "If Excel and Word both define `Application`, which one does `Application` mean?"
+Domain Expert: "Source `VbaDefinition`s still win first. Among host definitions, the `MainHostApplication` definition wins; if only non-main hosts tie, `NameResolution` stays ambiguous."
+
+Dev: "Should unqualified completion show both Excel and Word `Application`?"
+Domain Expert: "No. Unqualified host completion follows `NameResolution`; use `Word.` for Word-specific qualified completion."
+
+Dev: "Should syntax highlighting only color keywords and comments?"
+Domain Expert: "No. `SyntaxHighlighting` includes lexical VBA coloring and `SemanticToken`s for parsed project meaning."
+
+Dev: "Is source formatting only about casing?"
+Domain Expert: "No. `SourceFormatting` includes `CasingNormalization` and `IndentationFormatting`, but it is not a semantic refactor."
+
+Dev: "Is `String` a host definition when formatting casing?"
+Domain Expert: "No. Intrinsic words such as `String`, `True`, and `Nothing` belong to `LanguageVocabulary`."
+
+Dev: "Should typing Enter after `Sub` automatically insert `End Sub`?"
+Domain Expert: "No. `EndStatementCompletion` is an explicit completion item, not an on-type edit."
 
 Dev: "Can a normal apostrophe comment appear in hover?"
 Domain Expert: "No. Hover and signature help use `DocumentationComment`s only, with interface documentation inherited through `Implements` when the implementation has none."
@@ -90,6 +161,15 @@ Domain Expert: "Not in the MVP. `TypeResolution` uses explicit declarations such
 
 Dev: "Should `Constructor.New_Foo` resolve across modules?"
 Domain Expert: "Yes. It is a `QualifiedReference`; after `Constructor` resolves to a `ModuleIdentity`, `New_Foo` resolves to a public member in that module."
+
+Dev: "Does `Word.Application` mean the same thing as unqualified `Application`?"
+Domain Expert: "No. `Word.Application` is a `QualifiedReference` through the enabled Word `HostApplication`; unqualified `Application` follows `MainHostApplication` precedence."
+
+Dev: "What should `Word.` complete?"
+Domain Expert: "If no source definition named `Word` wins first, it completes root `HostDefinition`s from the enabled Word `HostApplication`."
+
+Dev: "If there is a source module named `Word`, does `Word.Application` still force the Word host?"
+Domain Expert: "No. Source `VbaDefinition`s outrank host qualifier names, so `Word` resolves to the source module first."
 
 Dev: "Does `Button_Click` resolve without reading form designer metadata?"
 Domain Expert: "Only when `Button` is explicitly declared as a `WithEvents` variable. That handler name is an `EventReference` to the `Click` event on the declared type."

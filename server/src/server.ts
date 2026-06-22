@@ -108,6 +108,7 @@ connection.onCompletion((params): CompletionItem[] => {
   }).map((item) => ({
     label: item.label,
     kind: toLspCompletionItemKind(item.kind),
+    detail: item.detail,
     insertText: item.insertText,
     insertTextFormat: item.insertTextFormat === 'snippet' ? InsertTextFormat.Snippet : undefined
   }));

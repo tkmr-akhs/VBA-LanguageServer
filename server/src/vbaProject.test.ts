@@ -64,12 +64,76 @@ test('bundled Excel HostDefinitions appear in completion and hover', () => {
   });
 
   assert.deepEqual(
-    completions.map((item) => item.label),
-    ['Application']
+    completions.map((item) => ({ label: item.label, detail: item.detail })),
+    [{ label: 'Application', detail: 'Excel.Application' }]
   );
   assert.deepEqual(hover, {
-    contents: 'Represents the Microsoft Excel application.'
+    contents: 'Excel.Application\n\nRepresents the Microsoft Excel application.'
   });
+});
+
+test('main HostApplication selects bundled Word HostDefinitions', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    Application',
+        'End Sub'
+      ].join('\n')
+    }
+  ], {
+    mainHostApplication: 'word'
+  });
+
+  const completions = getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 4, character: 7 }
+  });
+  const hover = getHover(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 4, character: 8 }
+  });
+
+  assert.deepEqual(
+    completions.map((item) => ({ label: item.label, detail: item.detail })),
+    [{ label: 'Application', detail: 'Word.Application' }]
+  );
+  assert.deepEqual(hover, {
+    contents: 'Word.Application\n\nRepresents the Microsoft Word application.'
+  });
+});
+
+test('main Word HostApplication enables bundled Word member completion', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    Dim doc As Document',
+        '    doc.Ra',
+        'End Sub'
+      ].join('\n')
+    }
+  ], {
+    mainHostApplication: 'word'
+  });
+
+  const completions = getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 5, character: 10 }
+  });
+
+  assert.deepEqual(
+    completions.map((item) => ({ label: item.label, detail: item.detail })),
+    [{ label: 'Range', detail: 'Word.Range' }]
+  );
 });
 
 test('bundled Excel HostDefinitions are not source definition or rename targets', () => {

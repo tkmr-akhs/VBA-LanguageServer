@@ -1,6 +1,6 @@
 import path from 'node:path';
 
-import { getBundledExcelHostDefinitions } from './excelHostCatalog';
+import { formatHostApplicationName, getBundledHostDefinitions } from './officeHostCatalog';
 
 export interface SourcePosition {
   line: number;
@@ -20,6 +20,7 @@ export interface VbaProjectFile {
 export interface CompletionEntry {
   label: string;
   kind: CompletionEntryKind;
+  detail?: string;
   insertText?: string;
   insertTextFormat?: 'snippet';
 }
@@ -43,16 +44,19 @@ export type CompletionEntryKind =
   | 'variable';
 
 export type HostDefinitionKind = 'class' | 'property' | 'function' | 'enum' | 'enumMember';
+export type HostApplication = 'excel' | 'word';
 
 export interface HostDefinition {
   name: string;
   kind?: HostDefinitionKind;
+  hostApplication?: HostApplication;
   documentation?: string;
   members?: HostDefinition[];
 }
 
 export interface BuildVbaProjectOptions {
   hostDefinitions?: HostDefinition[];
+  mainHostApplication?: HostApplication;
 }
 
 export interface DefinitionLocation {
@@ -223,7 +227,9 @@ export function buildVbaProject(
 
   return {
     modules,
-    hostDefinitions: options.hostDefinitions ?? getBundledExcelHostDefinitions()
+    hostDefinitions: options.hostDefinitions ?? getBundledHostDefinitions({
+      mainHostApplication: options.mainHostApplication
+    })
   };
 }
 
@@ -287,7 +293,8 @@ export function getCompletions(project: VbaProject, request: CompletionRequest):
     .filter((definition) => prefix === '' || definition.name.toLowerCase().startsWith(prefix))
     .map((definition) => ({
       label: definition.name,
-      kind: completionKindForHostDefinition(definition)
+      kind: completionKindForHostDefinition(definition),
+      detail: getHostDefinitionDetail(definition)
     }));
 
   return uniqueCompletionEntries([
@@ -313,7 +320,8 @@ function getTypedMemberCompletions(
     .filter((member) => prefix === '' || member.name.toLowerCase().startsWith(prefix))
     .map((member) => ({
       label: member.name,
-      kind: member.kind
+      kind: member.kind,
+      detail: member.detail
     }));
 }
 
@@ -345,7 +353,7 @@ export function getHover(project: VbaProject, request: CompletionRequest): Hover
   if (resolution.source === 'host') {
     return resolution.definition.documentation === undefined
       ? undefined
-      : { contents: resolution.definition.documentation };
+      : { contents: renderHostDefinitionHover(resolution.definition) };
   }
 
   const definition = findDefinitionByLocation(project, resolution.definition);
@@ -1419,12 +1427,13 @@ function getMembersForType(
   project: VbaProject,
   currentModule: VbaModule,
   typeName: string
-): { name: string; kind: CompletionEntryKind }[] {
+): { name: string; kind: CompletionEntryKind; detail?: string }[] {
   const host_type = project.hostDefinitions.find((definition) => sameName(definition.name, typeName));
   if (host_type?.members !== undefined) {
     return host_type.members.map((member) => ({
       name: member.name,
-      kind: completionKindForHostDefinition(member)
+      kind: completionKindForHostDefinition(member),
+      detail: getHostDefinitionDetail(member)
     }));
   }
 
@@ -1983,6 +1992,21 @@ function renderDocumentationComment(documentation: DocumentationComment): string
   }
 
   return sections.join('\n\n');
+}
+
+function renderHostDefinitionHover(definition: HostDefinition): string {
+  const detail = getHostDefinitionDetail(definition);
+  return detail === undefined
+    ? definition.documentation ?? ''
+    : [detail, definition.documentation].filter((section) => section !== undefined && section !== '').join('\n\n');
+}
+
+function getHostDefinitionDetail(definition: HostDefinition): string | undefined {
+  if (definition.hostApplication === undefined) {
+    return undefined;
+  }
+
+  return `${formatHostApplicationName(definition.hostApplication)}.${definition.name}`;
 }
 
 function renderSignatureDocumentation(documentation: DocumentationComment | undefined): string | undefined {

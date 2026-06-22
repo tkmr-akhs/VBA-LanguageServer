@@ -38,6 +38,34 @@ test('extension contributes a VBA TextMate grammar for the vba language', () => 
   ]);
 });
 
+test('extension contributes main HostApplication configuration', () => {
+  const package_json = JSON.parse(
+    fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf8')
+  ) as {
+    contributes?: {
+      configuration?: {
+        properties?: Record<string, {
+          scope?: string;
+          type?: string;
+          enum?: string[];
+          default?: string;
+        }>;
+      };
+    };
+  };
+  const main_host_setting = package_json.contributes?.configuration?.properties?.[
+    'vbaLanguageServer.mainHostApplication'
+  ];
+
+  assert.deepEqual(main_host_setting, {
+    scope: 'resource',
+    type: 'string',
+    enum: ['excel', 'word'],
+    default: 'excel',
+    description: 'Controls the primary Office host application for unqualified VBA host object model references.'
+  });
+});
+
 test('VBA TextMate grammar has lexical scopes for representative VBA fixtures', () => {
   const grammar = readGrammar();
   const patterns = flattenPatterns(grammar);

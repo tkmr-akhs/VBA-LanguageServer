@@ -50,6 +50,16 @@
           ],
           "default": "off",
           "description": "Controls LSP trace output for the VBA language server."
+        },
+        "vbaLanguageServer.mainHostApplication": {
+          "scope": "resource",
+          "type": "string",
+          "enum": [
+            "excel",
+            "word"
+          ],
+          "default": "excel",
+          "description": "Controls the primary Office host application for unqualified VBA host object model references."
         }
       }
     }

@@ -47,6 +47,18 @@ export interface RenameEdit {
   newText: string;
 }
 
+export interface TextChange {
+  range: SourceRange;
+  text: string;
+}
+
+export type VbaProjectUpdateStrategy = 'moduleMember' | 'fullRebuild';
+
+export interface VbaProjectUpdateResult {
+  project: VbaProject;
+  strategy: VbaProjectUpdateStrategy;
+}
+
 export interface HoverResult {
   contents: string;
 }
@@ -110,6 +122,14 @@ interface ProcedureScope {
   definitions: VbaDefinition[];
 }
 
+interface ModuleMember {
+  range: SourceRange;
+  definitions: VbaDefinition[];
+  procedureScopes: ProcedureScope[];
+  withEventsDeclarations: WithEventsDeclaration[];
+  implements: string[];
+}
+
 interface WithEventsDeclaration {
   name: string;
   typeName: string;
@@ -124,6 +144,7 @@ interface VbaModule {
   procedureScopes: ProcedureScope[];
   withEventsDeclarations: WithEventsDeclaration[];
   implements: string[];
+  moduleMembers: ModuleMember[];
 }
 
 export interface VbaProject {
@@ -144,6 +165,40 @@ export function buildVbaProject(
   return {
     modules,
     hostDefinitions: options.hostDefinitions ?? getBundledExcelHostDefinitions()
+  };
+}
+
+export function updateVbaProjectFile(
+  project: VbaProject,
+  uri: string,
+  change: TextChange
+): VbaProjectUpdateResult {
+  const current_module = findModule(project, uri);
+  if (current_module === undefined) {
+    return {
+      project,
+      strategy: 'fullRebuild'
+    };
+  }
+
+  const containing_member = current_module.moduleMembers.find((member) =>
+    containsRange(member.range, change.range)
+  );
+  const text = applyTextChange(current_module.lines, change);
+  const updated_module = parseModule({ uri, text });
+  const can_replace_member = containing_member !== undefined
+    && updated_module.moduleMembers.some((member) =>
+      member.range.start.line === containing_member.range.start.line
+    );
+
+  return {
+    project: {
+      modules: project.modules.map((module) =>
+        sameUri(module.uri, uri) ? updated_module : module
+      ),
+      hostDefinitions: project.hostDefinitions
+    },
+    strategy: can_replace_member ? 'moduleMember' : 'fullRebuild'
   };
 }
 
@@ -191,6 +246,10 @@ function getTypedMemberCompletions(
 
 export function getModuleIdentities(project: VbaProject): string[] {
   return project.modules.map((module) => module.identity);
+}
+
+export function getModuleMemberRanges(project: VbaProject, uri: string): SourceRange[] {
+  return findModule(project, uri)?.moduleMembers.map((member) => member.range) ?? [];
 }
 
 export function getTypeFields(project: VbaProject, typeName: string): { name: string; range: SourceRange }[] {
@@ -516,7 +575,8 @@ function parseModule(file: VbaProjectFile): VbaModule {
     definitions: parsed_members.definitions,
     procedureScopes: parsed_members.procedureScopes,
     withEventsDeclarations: parsed_members.withEventsDeclarations,
-    implements: parsed_members.implements
+    implements: parsed_members.implements,
+    moduleMembers: parsed_members.moduleMembers
   };
 }
 
@@ -606,26 +666,44 @@ function parseModuleMembers(
   procedureScopes: ProcedureScope[];
   withEventsDeclarations: WithEventsDeclaration[];
   implements: string[];
+  moduleMembers: ModuleMember[];
 } {
   const definitions: VbaDefinition[] = [];
   const procedureScopes: ProcedureScope[] = [];
   const withEventsDeclarations: WithEventsDeclaration[] = [];
   const implementedInterfaces: string[] = [];
+  const moduleMembers: ModuleMember[] = [];
 
   for (let line_index = start_line; line_index < lines.length; line_index += 1) {
     const line = lines[line_index];
     const implements_match = /^\s*Implements\s+([A-Za-z_][A-Za-z0-9_]*)\b/i.exec(line);
     if (implements_match !== null) {
-      implementedInterfaces.push(implements_match[1]);
+      const implemented_interface = implements_match[1];
+      implementedInterfaces.push(implemented_interface);
+      moduleMembers.push({
+        range: createModuleMemberRange(lines, line_index, line_index),
+        definitions: [],
+        procedureScopes: [],
+        withEventsDeclarations: [],
+        implements: [implemented_interface]
+      });
       continue;
     }
 
     const with_events_match =
       /^\s*(?:(?:Public|Private|Dim)\s+)?WithEvents\s+([A-Za-z_][A-Za-z0-9_]*)\s+As\s+([A-Za-z_][A-Za-z0-9_]*)\b/i.exec(line);
     if (with_events_match !== null) {
-      withEventsDeclarations.push({
+      const declaration = {
         name: with_events_match[1],
         typeName: with_events_match[2]
+      };
+      withEventsDeclarations.push(declaration);
+      moduleMembers.push({
+        range: createModuleMemberRange(lines, line_index, line_index),
+        definitions: [],
+        procedureScopes: [],
+        withEventsDeclarations: [declaration],
+        implements: []
       });
       continue;
     }
@@ -635,7 +713,7 @@ function parseModuleMembers(
       const visibility = (event_match[1]?.toLowerCase() ?? 'public') as 'public' | 'private';
       const name = event_match[2];
       const name_start = line.indexOf(name);
-      definitions.push({
+      const definition: VbaDefinition = {
         name,
         kind: 'event',
         visibility,
@@ -645,6 +723,14 @@ function parseModuleMembers(
           end: { line: line_index, character: name_start + name.length }
         },
         documentation: parseDocumentationComment(lines, line_index)
+      };
+      definitions.push(definition);
+      moduleMembers.push({
+        range: createModuleMemberRange(lines, line_index, line_index),
+        definitions: [definition],
+        procedureScopes: [],
+        withEventsDeclarations: [],
+        implements: []
       });
       continue;
     }
@@ -654,7 +740,7 @@ function parseModuleMembers(
       const visibility = (enum_match[1]?.toLowerCase() ?? 'public') as 'public' | 'private';
       const name = enum_match[2];
       const name_start = line.indexOf(name);
-      definitions.push({
+      const enum_definition: VbaDefinition = {
         name,
         kind: 'enum',
         visibility,
@@ -664,10 +750,19 @@ function parseModuleMembers(
           end: { line: line_index, character: name_start + name.length }
         },
         documentation: parseDocumentationComment(lines, line_index)
-      });
+      };
 
       const end_line_index = findBlockEndLine(lines, line_index + 1, 'enum');
-      definitions.push(...parseEnumMemberDefinitions(uri, lines, line_index + 1, end_line_index, visibility));
+      const enum_member_definitions = parseEnumMemberDefinitions(uri, lines, line_index + 1, end_line_index, visibility);
+      const member_definitions = [enum_definition, ...enum_member_definitions];
+      definitions.push(...member_definitions);
+      moduleMembers.push({
+        range: createModuleMemberRange(lines, line_index, end_line_index),
+        definitions: member_definitions,
+        procedureScopes: [],
+        withEventsDeclarations: [],
+        implements: []
+      });
       line_index = end_line_index;
       continue;
     }
@@ -678,7 +773,7 @@ function parseModuleMembers(
       const name = type_match[2];
       const name_start = line.indexOf(name);
       const end_line_index = findBlockEndLine(lines, line_index + 1, 'type');
-      definitions.push({
+      const definition: VbaDefinition = {
         name,
         kind: 'type',
         visibility,
@@ -689,6 +784,14 @@ function parseModuleMembers(
         },
         documentation: parseDocumentationComment(lines, line_index),
         children: parseTypeFieldDefinitions(uri, lines, line_index + 1, end_line_index, visibility)
+      };
+      definitions.push(definition);
+      moduleMembers.push({
+        range: createModuleMemberRange(lines, line_index, end_line_index),
+        definitions: [definition],
+        procedureScopes: [],
+        withEventsDeclarations: [],
+        implements: []
       });
       line_index = end_line_index;
       continue;
@@ -711,7 +814,7 @@ function parseModuleMembers(
     const parameter_definitions = procedure_match[5] === undefined
       ? []
       : parseParameterDefinitions(uri, line, line_index, procedure_match[5], parameter_start);
-    definitions.push({
+    const definition: VbaDefinition = {
       name,
       kind: procedure_kind,
       visibility,
@@ -723,11 +826,12 @@ function parseModuleMembers(
       documentation: parseDocumentationComment(lines, line_index),
       signature: buildSignatureInfo(line, name, parameter_definitions),
       typeName: parseReturnTypeName(line)
-    });
+    };
+    definitions.push(definition);
 
     const end_line_index = findProcedureEndLine(lines, line_index + 1, end_keyword);
 
-    procedureScopes.push({
+    const procedure_scope: ProcedureScope = {
       range: {
         start: { line: line_index, character: 0 },
         end: { line: end_line_index, character: lines[end_line_index]?.length ?? 0 }
@@ -736,6 +840,14 @@ function parseModuleMembers(
         ...parameter_definitions,
         ...parseProcedureDefinitions(uri, lines, line_index + 1, end_line_index)
       ]
+    };
+    procedureScopes.push(procedure_scope);
+    moduleMembers.push({
+      range: createModuleMemberRange(lines, line_index, end_line_index),
+      definitions: [definition],
+      procedureScopes: [procedure_scope],
+      withEventsDeclarations: [],
+      implements: []
     });
     line_index = end_line_index;
   }
@@ -744,8 +856,33 @@ function parseModuleMembers(
     definitions,
     procedureScopes,
     withEventsDeclarations,
-    implements: implementedInterfaces
+    implements: implementedInterfaces,
+    moduleMembers
   };
+}
+
+function createModuleMemberRange(lines: string[], startLine: number, endLine: number): SourceRange {
+  return {
+    start: { line: startLine, character: 0 },
+    end: { line: endLine, character: lines[endLine]?.length ?? 0 }
+  };
+}
+
+function applyTextChange(lines: string[], change: TextChange): string {
+  const text = lines.join('\n');
+  const start_offset = getTextOffset(lines, change.range.start);
+  const end_offset = getTextOffset(lines, change.range.end);
+
+  return `${text.slice(0, start_offset)}${change.text}${text.slice(end_offset)}`;
+}
+
+function getTextOffset(lines: string[], position: SourcePosition): number {
+  let offset = 0;
+  for (let line_index = 0; line_index < position.line; line_index += 1) {
+    offset += (lines[line_index]?.length ?? 0) + 1;
+  }
+
+  return offset + position.character;
 }
 
 function parseEnumMemberDefinitions(
@@ -1333,6 +1470,10 @@ function toVbaResolution(definition: VbaDefinition): NameResolutionResult {
 
 function containsPosition(range: SourceRange, position: SourcePosition): boolean {
   return comparePosition(range.start, position) <= 0 && comparePosition(position, range.end) <= 0;
+}
+
+function containsRange(outerRange: SourceRange, innerRange: SourceRange): boolean {
+  return containsPosition(outerRange, innerRange.start) && containsPosition(outerRange, innerRange.end);
 }
 
 function comparePosition(left: SourcePosition, right: SourcePosition): number {

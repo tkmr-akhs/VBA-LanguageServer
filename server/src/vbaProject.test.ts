@@ -7,11 +7,13 @@ import {
   getDefinition,
   getHover,
   getModuleIdentities,
+  getModuleMemberRanges,
   getRenameEdits,
   getRenameTarget,
   getSignatureHelp,
   getTypeFields,
-  resolveName
+  resolveName,
+  updateVbaProjectFile
 } from './vbaProject';
 import { getBundledExcelHostDefinitions } from './excelHostCatalog';
 
@@ -644,6 +646,122 @@ test('rename excludes HostDefinitions and ambiguous references', () => {
       newText: 'MakeValue'
     }
   ]);
+});
+
+test('incremental update records ModuleMember ranges and replaces a changed member', () => {
+  const project = buildVbaProject(
+    [
+      {
+        uri: 'file:///project/Worker.bas',
+        text: [
+          'Attribute VB_Name = "Worker"',
+          'Option Explicit',
+          '',
+          'Public Function FirstValue() As String',
+          'End Function',
+          '',
+          'Public Function SecondValue() As String',
+          'End Function',
+          '',
+          'Public Sub Run()',
+          '    Ren',
+          '    Sec',
+          'End Sub'
+        ].join('\n')
+      }
+    ],
+    {
+      hostDefinitions: []
+    }
+  );
+
+  assert.deepEqual(
+    getModuleMemberRanges(project, 'file:///project/Worker.bas').map((range) => [
+      range.start.line,
+      range.end.line
+    ]),
+    [
+      [3, 4],
+      [6, 7],
+      [9, 12]
+    ]
+  );
+
+  const result = updateVbaProjectFile(project, 'file:///project/Worker.bas', {
+    range: {
+      start: { line: 3, character: 16 },
+      end: { line: 3, character: 26 }
+    },
+    text: 'RenamedValue'
+  });
+
+  assert.equal(result.strategy, 'moduleMember');
+  assert.deepEqual(
+    getCompletions(result.project, {
+      uri: 'file:///project/Worker.bas',
+      position: { line: 10, character: 7 }
+    }).map((item) => item.label),
+    ['RenamedValue']
+  );
+  assert.deepEqual(
+    getCompletions(result.project, {
+      uri: 'file:///project/Worker.bas',
+      position: { line: 11, character: 7 }
+    }).map((item) => item.label),
+    ['SecondValue']
+  );
+});
+
+test('incremental update falls back to full rebuild outside members and during parser recovery', () => {
+  const project = buildVbaProject(
+    [
+      {
+        uri: 'file:///project/Worker.bas',
+        text: [
+          'Attribute VB_Name = "Worker"',
+          'Option Explicit',
+          '',
+          'Public Function FirstValue() As String',
+          'End Function',
+          '',
+          'Public Function SecondValue() As String',
+          'End Function',
+          '',
+          'Public Sub Run()',
+          '    Sec',
+          'End Sub'
+        ].join('\n')
+      }
+    ],
+    {
+      hostDefinitions: []
+    }
+  );
+
+  const outside_member_result = updateVbaProjectFile(project, 'file:///project/Worker.bas', {
+    range: {
+      start: { line: 2, character: 0 },
+      end: { line: 2, character: 0 }
+    },
+    text: "' inserted outside a member\n"
+  });
+  const parser_recovery_result = updateVbaProjectFile(project, 'file:///project/Worker.bas', {
+    range: {
+      start: { line: 3, character: 0 },
+      end: { line: 3, character: 38 }
+    },
+    text: 'This is not a member declaration'
+  });
+
+  assert.equal(outside_member_result.strategy, 'fullRebuild');
+  assert.equal(parser_recovery_result.strategy, 'fullRebuild');
+  assert.deepEqual(
+    getCompletions(parser_recovery_result.project, {
+      uri: 'file:///project/Worker.bas',
+      position: { line: 10, character: 7 }
+    }).map((item) => item.label),
+    ['SecondValue']
+  );
 });
 
 test('completion includes a Public Function from a sibling module in the same VbaProject', () => {

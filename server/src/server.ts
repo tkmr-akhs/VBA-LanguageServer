@@ -24,6 +24,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import { createDefaultHostCatalogManager } from './hostCatalogService';
 import {
   buildVbaProject,
   getCompletions,
@@ -39,6 +40,9 @@ import {
 
 const connection = createConnection(ProposedFeatures.all);
 const documents: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
+const hostCatalogManager = createDefaultHostCatalogManager();
+
+void hostCatalogManager.refreshFromExcelComAsync();
 
 connection.onInitialize((_params: InitializeParams): InitializeResult => {
   return {
@@ -241,7 +245,9 @@ function buildProjectForDocument(document: TextDocument): ReturnType<typeof buil
     });
   }
 
-  return buildVbaProject([...files.values()]);
+  return buildVbaProject([...files.values()], {
+    hostDefinitions: hostCatalogManager.getDefinitions()
+  });
 }
 
 function toLspPosition(position: Position): Position {

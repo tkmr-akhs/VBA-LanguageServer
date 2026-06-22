@@ -94,6 +94,90 @@ const bundledHostDefinitionsByApplication: Partial<Record<HostApplication, HostD
         { name: 'Range', kind: 'property', documentation: 'Returns the selection range.' }
       ]
     }
+  ],
+  powerpoint: [
+    {
+      name: 'Application',
+      kind: 'class',
+      documentation: 'Represents the Microsoft PowerPoint application.',
+      members: [
+        { name: 'ActivePresentation', kind: 'property', documentation: 'Returns the active presentation.' },
+        { name: 'Presentations', kind: 'property', documentation: 'Returns the Presentations collection.' },
+        { name: 'SlideShowWindows', kind: 'property', documentation: 'Returns the SlideShowWindows collection.' }
+      ]
+    },
+    {
+      name: 'Presentation',
+      kind: 'class',
+      documentation: 'Represents a PowerPoint presentation.',
+      members: [
+        { name: 'Name', kind: 'property', documentation: 'Returns the presentation name.' },
+        { name: 'Slides', kind: 'property', documentation: 'Returns the Slides collection.' },
+        { name: 'SlideShowSettings', kind: 'property', documentation: 'Returns the slide show settings.' }
+      ]
+    },
+    {
+      name: 'Slide',
+      kind: 'class',
+      documentation: 'Represents a PowerPoint slide.',
+      members: [
+        { name: 'Name', kind: 'property', documentation: 'Returns the slide name.' },
+        { name: 'Shapes', kind: 'property', documentation: 'Returns the Shapes collection.' }
+      ]
+    },
+    {
+      name: 'Shape',
+      kind: 'class',
+      documentation: 'Represents a shape on a PowerPoint slide.',
+      members: [
+        { name: 'Name', kind: 'property', documentation: 'Returns the shape name.' },
+        { name: 'TextFrame', kind: 'property', documentation: 'Returns the text frame for the shape.' },
+        { name: 'Visible', kind: 'property', documentation: 'Returns or sets whether the shape is visible.' }
+      ]
+    }
+  ],
+  access: [
+    {
+      name: 'Application',
+      kind: 'class',
+      documentation: 'Represents the Microsoft Access application.',
+      members: [
+        { name: 'CurrentDb', kind: 'function', documentation: 'Returns the current database object.' },
+        { name: 'DoCmd', kind: 'property', documentation: 'Returns the DoCmd object.' },
+        { name: 'Forms', kind: 'property', documentation: 'Returns the Forms collection.' },
+        { name: 'Reports', kind: 'property', documentation: 'Returns the Reports collection.' }
+      ]
+    },
+    {
+      name: 'DoCmd',
+      kind: 'class',
+      documentation: 'Provides methods for running Access actions.',
+      members: [
+        { name: 'OpenForm', kind: 'function', documentation: 'Opens a form.' },
+        { name: 'OpenReport', kind: 'function', documentation: 'Opens a report.' },
+        { name: 'Close', kind: 'function', documentation: 'Closes an Access object.' }
+      ]
+    },
+    {
+      name: 'Form',
+      kind: 'class',
+      documentation: 'Represents an Access form.',
+      members: [
+        { name: 'Name', kind: 'property', documentation: 'Returns the form name.' },
+        { name: 'RecordSource', kind: 'property', documentation: 'Returns or sets the source of records for the form.' },
+        { name: 'Controls', kind: 'property', documentation: 'Returns the Controls collection.' }
+      ]
+    },
+    {
+      name: 'Report',
+      kind: 'class',
+      documentation: 'Represents an Access report.',
+      members: [
+        { name: 'Name', kind: 'property', documentation: 'Returns the report name.' },
+        { name: 'RecordSource', kind: 'property', documentation: 'Returns or sets the source of records for the report.' },
+        { name: 'Controls', kind: 'property', documentation: 'Returns the Controls collection.' }
+      ]
+    }
   ]
 };
 

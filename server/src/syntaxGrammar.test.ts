@@ -60,7 +60,7 @@ test('extension contributes main HostApplication configuration', () => {
   assert.deepEqual(main_host_setting, {
     scope: 'resource',
     type: 'string',
-    enum: ['excel', 'word'],
+    enum: ['excel', 'word', 'powerpoint', 'access'],
     default: 'excel',
     description: 'Controls the primary Office host application for unqualified VBA host object model references.'
   });
@@ -93,7 +93,7 @@ test('extension contributes additional HostApplications configuration', () => {
     type: 'array',
     items: {
       type: 'string',
-      enum: ['word']
+      enum: ['excel', 'word', 'powerpoint', 'access']
     },
     default: [],
     description: 'Controls additional Office host applications enabled alongside the main VBA host application.'

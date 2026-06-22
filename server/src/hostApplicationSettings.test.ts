@@ -50,3 +50,15 @@ test('HostApplication configuration changes are visible without recreating the p
     additionalHostApplications: ['excel']
   });
 });
+
+test('HostApplication configuration accepts PowerPoint and Access values', async () => {
+  const provider = new HostApplicationConfigurationProvider(async () => ({
+    mainHostApplication: 'powerpoint',
+    additionalHostApplications: ['access']
+  }));
+
+  assert.deepEqual(await provider.getOptions('file:///project/Deck.bas'), {
+    mainHostApplication: 'powerpoint',
+    additionalHostApplications: ['access']
+  });
+});

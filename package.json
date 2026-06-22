@@ -56,7 +56,9 @@
           "type": "string",
           "enum": [
             "excel",
-            "word"
+            "word",
+            "powerpoint",
+            "access"
           ],
           "default": "excel",
           "description": "Controls the primary Office host application for unqualified VBA host object model references."
@@ -67,7 +69,10 @@
           "items": {
             "type": "string",
             "enum": [
-              "word"
+              "excel",
+              "word",
+              "powerpoint",
+              "access"
             ]
           },
           "default": [],

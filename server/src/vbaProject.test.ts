@@ -365,6 +365,151 @@ test('same-name non-main HostDefinitions remain ambiguous for unqualified refere
   assert.deepEqual(completions, []);
 });
 
+test('PowerPoint and Access bundled HostApplications provide root completion', () => {
+  const powerpoint_line = '    Application';
+  const access_line = '    Access.';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        powerpoint_line,
+        access_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ], {
+    mainHostApplication: 'powerpoint',
+    additionalHostApplications: ['access']
+  });
+
+  const powerpoint_completions = getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 4, character: powerpoint_line.length }
+  });
+  const access_completions = getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 5, character: access_line.length }
+  });
+
+  assert.deepEqual(
+    powerpoint_completions.map((item) => ({ label: item.label, detail: item.detail })),
+    [{ label: 'Application', detail: 'PowerPoint.Application' }]
+  );
+  assert.deepEqual(
+    access_completions.map((item) => ({ label: item.label, detail: item.detail })),
+    [
+      { label: 'Application', detail: 'Access.Application' },
+      { label: 'DoCmd', detail: 'Access.DoCmd' },
+      { label: 'Form', detail: 'Access.Form' },
+      { label: 'Report', detail: 'Access.Report' }
+    ]
+  );
+});
+
+test('PowerPoint and Access bundled HostApplications provide host-qualified member completion', () => {
+  const powerpoint_line = '    PowerPoint.Application.Active';
+  const access_line = '    Access.DoCmd.Open';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        powerpoint_line,
+        access_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ], {
+    mainHostApplication: 'powerpoint',
+    additionalHostApplications: ['access']
+  });
+
+  const powerpoint_completions = getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 4, character: powerpoint_line.length }
+  });
+  const access_completions = getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 5, character: access_line.length }
+  });
+
+  assert.deepEqual(
+    powerpoint_completions.map((item) => ({ label: item.label, detail: item.detail })),
+    [{ label: 'ActivePresentation', detail: 'PowerPoint.ActivePresentation' }]
+  );
+  assert.deepEqual(
+    access_completions.map((item) => ({ label: item.label, detail: item.detail })),
+    [
+      { label: 'OpenForm', detail: 'Access.OpenForm' },
+      { label: 'OpenReport', detail: 'Access.OpenReport' }
+    ]
+  );
+});
+
+test('Access bundled HostApplication excludes external reference libraries', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    Access.',
+        'End Sub'
+      ].join('\n')
+    }
+  ], {
+    mainHostApplication: 'access'
+  });
+
+  const completions = getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 4, character: 11 }
+  });
+
+  assert.deepEqual(
+    completions.map((item) => item.label),
+    ['Application', 'DoCmd', 'Form', 'Report']
+  );
+});
+
+test('disabled PowerPoint and Access HostApplication qualifiers do not resolve', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    PowerPoint.',
+        '    Access.',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  const powerpoint_completions = getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 4, character: 15 }
+  });
+  const access_completions = getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 5, character: 11 }
+  });
+
+  assert.deepEqual(powerpoint_completions, []);
+  assert.deepEqual(access_completions, []);
+});
+
 test('bundled Excel HostDefinitions are not source definition or rename targets', () => {
   const project = buildVbaProject([
     {

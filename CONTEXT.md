@@ -86,8 +86,12 @@ The name of an exported VBA module, class, or form as defined by `Attribute VB_N
 _Avoid_: file name, module file, path name
 
 **TypeResolution**:
-The process of matching an explicit VBA type annotation to a `VbaDefinition` or `HostDefinition` for member completion and member documentation. The MVP uses declared types from variables, parameters, procedure return types, and property return types; assignment-based inference is outside the MVP.
+The process of matching an explicit VBA type annotation to a `VbaDefinition` or `HostDefinition` for member completion and member documentation. Source `VbaDefinition`s outrank host `HostDefinition`s unless the annotation is host-qualified, and assignment-based inference is outside the MVP.
 _Avoid_: type inference, runtime type, guessed type
+
+**MemberChainResolution**:
+The process of resolving a sequence of member accesses by carrying each resolved member's declared result type to the next member access. It applies to both source `VbaDefinition`s and host `HostDefinition`s when result type metadata is available; missing or ambiguous result types stop the chain.
+_Avoid_: host chain resolution, dotted lookup, chained lookup
 
 **QualifiedReference**:
 An identifier reference written with a qualifier, such as `ModuleIdentity.MemberName`, `variable.MemberName`, or `Word.Application`. When the qualifier names a module, class, or form, only public members of that definition are visible from outside that module; when it names an enabled `HostApplication`, only that host's `HostDefinition`s are visible.
@@ -166,6 +170,15 @@ Domain Expert: "The `ModuleIdentity` is `CustomerRecord`; the file name is only 
 
 Dev: "Should `Set ws = Worksheets(1)` make `ws.` show worksheet members?"
 Domain Expert: "Not in the MVP. `TypeResolution` uses explicit declarations such as `Dim ws As Worksheet`."
+
+Dev: "If both a source class and Excel define `Range`, what should `Dim r As Range` mean?"
+Domain Expert: "The source `VbaDefinition` wins. Use a host-qualified annotation such as `Dim r As Excel.Range` to force a `HostDefinition`."
+
+Dev: "Should `Application.ActiveWorkbook.Worksheets(1).Range(\"A1\").Find(` be treated as several unrelated qualified references?"
+Domain Expert: "No. That is `MemberChainResolution`: each resolved member's declared result type supplies the receiver type for the next member access."
+
+Dev: "Can `Me.CreateCustomer().DisplayName` participate in `MemberChainResolution`?"
+Domain Expert: "Yes, inside class and form modules. `Me` is the current instance root, and private members remain visible within that same module."
 
 Dev: "Should `Constructor.New_Foo` resolve across modules?"
 Domain Expert: "Yes. It is a `QualifiedReference`; after `Constructor` resolves to a `ModuleIdentity`, `New_Foo` resolves to a public member in that module."

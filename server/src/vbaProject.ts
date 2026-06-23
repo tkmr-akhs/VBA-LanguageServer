@@ -193,6 +193,47 @@ interface VbaDefinition {
   defaultValue?: string;
 }
 
+interface MemberChainSegment {
+  name: string;
+  range: SourceRange;
+  hasCall: boolean;
+}
+
+interface MemberChainExpression {
+  segments: MemberChainSegment[];
+  targetSegmentIndex: number;
+}
+
+interface MemberCompletionRequest {
+  qualifier: string;
+  prefix: string;
+  receiverChain?: MemberChainExpression;
+}
+
+interface CallExpression {
+  name: string;
+  nameStart: number;
+  activeParameter: number;
+  chain?: MemberChainExpression;
+}
+
+type TypeResolutionRef =
+  | {
+      source: 'vba';
+      typeName: string;
+      allowPrivate: boolean;
+    }
+  | {
+      source: 'host';
+      typeName: string;
+      hostApplication?: HostApplication;
+    };
+
+interface ResolvedChainSegment {
+  resolution?: NameResolutionResult;
+  typeRef?: TypeResolutionRef;
+}
+
 interface DocumentationComment {
   brief: string[];
   details: string[];
@@ -364,7 +405,7 @@ function getTypedMemberCompletions(
   project: VbaProject,
   currentModule: VbaModule,
   position: SourcePosition,
-  request: { qualifier: string; prefix: string }
+  request: MemberCompletionRequest
 ): CompletionEntry[] {
   const root_host_completions = getRootHostCompletions(project, currentModule, request.qualifier, request.prefix);
   if (root_host_completions !== undefined) {
@@ -381,6 +422,20 @@ function getTypedMemberCompletions(
         kind: completionKindForHostDefinition(member),
         detail: getHostDefinitionDetail(member)
       }));
+  }
+
+  if (request.receiverChain !== undefined) {
+    const type_ref = resolveMemberChainReceiverType(project, currentModule, position, request.receiverChain);
+    if (type_ref !== undefined) {
+      const prefix = request.prefix.toLowerCase();
+      return getMembersForResolvedType(project, currentModule, type_ref)
+        .filter((member) => prefix === '' || member.name.toLowerCase().startsWith(prefix))
+        .map((member) => ({
+          label: member.name,
+          kind: member.kind,
+          detail: member.detail
+        }));
+    }
   }
 
   const type_name = findTypeNameForExpression(project, currentModule, position, request.qualifier);
@@ -544,13 +599,15 @@ export function getSignatureHelp(
     return undefined;
   }
 
-  const resolution = resolveName(project, {
-    uri: request.uri,
-    position: {
-      line: request.position.line,
-      character: call_expression.nameStart
-    }
-  });
+  const resolution = call_expression.chain === undefined
+    ? resolveName(project, {
+      uri: request.uri,
+      position: {
+        line: request.position.line,
+        character: call_expression.nameStart
+      }
+    })
+    : resolveMemberChainTarget(project, current_module, request.position, call_expression.chain);
   if (resolution === undefined) {
     return undefined;
   }
@@ -636,6 +693,11 @@ export function resolveName(
   const identifier = getIdentifierAt(current_module.lines, request.position);
   if (identifier === undefined) {
     return undefined;
+  }
+
+  const member_chain = getMemberChainExpressionAt(current_module.lines, request.position);
+  if (member_chain !== undefined && member_chain.segments.length > 1) {
+    return resolveMemberChainTarget(project, current_module, request.position, member_chain);
   }
 
   const qualified_reference = getQualifiedReferenceAt(current_module.lines, request.position);
@@ -1472,18 +1534,272 @@ function parseProcedureDefinitions(
 function getMemberCompletionAt(
   lines: string[],
   position: SourcePosition
-): { qualifier: string; prefix: string } | undefined {
+): MemberCompletionRequest | undefined {
   const line = lines[position.line] ?? '';
-  const text_before_position = line.slice(0, position.character);
-  const match = /([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*(?:\s*\([^()]*\))?)\.\s*([A-Za-z_][A-Za-z0-9_]*)?$/i.exec(text_before_position);
-  if (match === null) {
+  const effective_character = Math.min(position.character, line.length);
+  if (!isCodePosition(line, effective_character)) {
     return undefined;
   }
 
+  const prefix = getIdentifierPrefix(lines, position);
+  const prefix_start = effective_character - prefix.length;
+  const dot_index = findPreviousNonWhitespace(line, prefix_start - 1);
+  if (dot_index === undefined || line[dot_index] !== '.') {
+    return undefined;
+  }
+
+  const receiver_chain = parseMemberChainEndingAt(line, position.line, dot_index);
+  if (receiver_chain === undefined) {
+    return undefined;
+  }
+
+  const qualifier_start = receiver_chain.segments[0].range.start.character;
   return {
-    qualifier: match[1],
-    prefix: match[2] ?? ''
+    qualifier: line.slice(qualifier_start, dot_index).trim(),
+    prefix,
+    receiverChain: receiver_chain
   };
+}
+
+function parseMemberChainEndingAt(
+  line: string,
+  lineIndex: number,
+  endCharacter: number
+): MemberChainExpression | undefined {
+  return parseMemberChainEndingBefore(line, lineIndex, endCharacter);
+}
+
+function parseMemberChainEndingBefore(
+  line: string,
+  lineIndex: number,
+  endCharacter: number
+): MemberChainExpression | undefined {
+  const expression_end = findPreviousNonWhitespace(line, endCharacter - 1);
+  if (expression_end === undefined) {
+    return undefined;
+  }
+
+  const end_index = expression_end + 1;
+  const candidates: Array<{ segments: MemberChainSegment[]; endIndex: number }> = [];
+  for (const range of getIdentifierRangesInCode(line, lineIndex)) {
+    if (range.start.character >= end_index) {
+      continue;
+    }
+
+    const candidate = parseMemberChainFrom(line, lineIndex, range.start.character, end_index);
+    if (candidate !== undefined && candidate.endIndex === end_index) {
+      candidates.push(candidate);
+    }
+  }
+
+  const selected = candidates.sort((left, right) =>
+    right.segments.length - left.segments.length
+      || left.segments[0].range.start.character - right.segments[0].range.start.character
+  )[0];
+  return selected === undefined
+    ? undefined
+    : {
+        segments: selected.segments,
+        targetSegmentIndex: selected.segments.length - 1
+      };
+}
+
+function getMemberChainExpressionAt(
+  lines: string[],
+  position: SourcePosition
+): MemberChainExpression | undefined {
+  const line = lines[position.line] ?? '';
+  const identifier_range = getIdentifierRangesInCode(line, position.line).find((range) =>
+    position.character >= range.start.character && position.character <= range.end.character
+  );
+  if (identifier_range === undefined) {
+    return undefined;
+  }
+
+  const chain = parseMemberChainEndingBefore(line, position.line, identifier_range.end.character);
+  if (chain === undefined) {
+    return undefined;
+  }
+
+  const target_segment_index = chain.segments.findIndex((segment) =>
+    sameRange(segment.range, identifier_range)
+  );
+  return target_segment_index === -1
+    ? undefined
+    : {
+        segments: chain.segments,
+        targetSegmentIndex: target_segment_index
+      };
+}
+
+function parseMemberChainFrom(
+  line: string,
+  lineIndex: number,
+  startCharacter: number,
+  endCharacter: number
+): { segments: MemberChainSegment[]; endIndex: number } | undefined {
+  const segments: MemberChainSegment[] = [];
+  let character_index = startCharacter;
+
+  while (character_index < endCharacter) {
+    character_index = skipWhitespace(line, character_index, endCharacter);
+    const identifier = readIdentifierAt(line, character_index);
+    if (identifier === undefined) {
+      return undefined;
+    }
+
+    character_index = identifier.end;
+    character_index = skipWhitespace(line, character_index, endCharacter);
+    let has_call = false;
+    if (character_index < endCharacter && line[character_index] === '(') {
+      const close_paren = findMatchingParen(line, character_index, endCharacter);
+      if (close_paren === undefined) {
+        return undefined;
+      }
+
+      has_call = true;
+      character_index = close_paren + 1;
+      character_index = skipWhitespace(line, character_index, endCharacter);
+    }
+
+    segments.push({
+      name: identifier.name,
+      range: {
+        start: { line: lineIndex, character: identifier.start },
+        end: { line: lineIndex, character: identifier.end }
+      },
+      hasCall: has_call
+    });
+
+    if (character_index >= endCharacter || line[character_index] !== '.') {
+      break;
+    }
+
+    character_index += 1;
+  }
+
+  const end_index = skipWhitespace(line, character_index, endCharacter);
+  return segments.length === 0 ? undefined : { segments, endIndex: end_index };
+}
+
+function readIdentifierAt(
+  line: string,
+  startCharacter: number
+): { name: string; start: number; end: number } | undefined {
+  if (!isIdentifierStart(line[startCharacter] ?? '')) {
+    return undefined;
+  }
+
+  let character_index = startCharacter + 1;
+  while (character_index < line.length && isIdentifierPart(line[character_index])) {
+    character_index += 1;
+  }
+
+  return {
+    name: line.slice(startCharacter, character_index),
+    start: startCharacter,
+    end: character_index
+  };
+}
+
+function findMatchingParen(
+  line: string,
+  openParen: number,
+  endCharacter: number
+): number | undefined {
+  let depth = 0;
+  let character_index = openParen;
+  let is_in_string = false;
+
+  while (character_index < endCharacter) {
+    const character = line[character_index];
+    if (is_in_string) {
+      if (character === '"') {
+        if (line[character_index + 1] === '"') {
+          character_index += 2;
+        } else {
+          is_in_string = false;
+          character_index += 1;
+        }
+      } else {
+        character_index += 1;
+      }
+      continue;
+    }
+
+    if (character === "'") {
+      return undefined;
+    }
+    if (character === '"') {
+      is_in_string = true;
+      character_index += 1;
+      continue;
+    }
+    if (character === '(') {
+      depth += 1;
+    } else if (character === ')') {
+      depth -= 1;
+      if (depth === 0) {
+        return character_index;
+      }
+    }
+
+    character_index += 1;
+  }
+
+  return undefined;
+}
+
+function findPreviousNonWhitespace(line: string, startCharacter: number): number | undefined {
+  for (let character_index = startCharacter; character_index >= 0; character_index -= 1) {
+    if (!/\s/.test(line[character_index])) {
+      return character_index;
+    }
+  }
+
+  return undefined;
+}
+
+function skipWhitespace(line: string, startCharacter: number, endCharacter: number): number {
+  let character_index = startCharacter;
+  while (character_index < endCharacter && /\s/.test(line[character_index])) {
+    character_index += 1;
+  }
+
+  return character_index;
+}
+
+function isCodePosition(line: string, character: number): boolean {
+  let character_index = 0;
+  let is_in_string = false;
+
+  while (character_index < Math.min(character, line.length)) {
+    const current_character = line[character_index];
+    if (is_in_string) {
+      if (current_character === '"') {
+        if (line[character_index + 1] === '"') {
+          character_index += 2;
+        } else {
+          is_in_string = false;
+          character_index += 1;
+        }
+      } else {
+        character_index += 1;
+      }
+      continue;
+    }
+
+    if (current_character === "'") {
+      return false;
+    }
+    if (current_character === '"') {
+      is_in_string = true;
+    }
+
+    character_index += 1;
+  }
+
+  return !is_in_string;
 }
 
 function getEndStatementCompletionAt(
@@ -1614,17 +1930,324 @@ function findTypeNameForExpression(
   return undefined;
 }
 
+function resolveMemberChainReceiverType(
+  project: VbaProject,
+  currentModule: VbaModule,
+  position: SourcePosition,
+  chain: MemberChainExpression
+): TypeResolutionRef | undefined {
+  const resolved_segments = resolveMemberChain(project, currentModule, position, chain);
+  return resolved_segments?.at(-1)?.typeRef;
+}
+
+function resolveMemberChainTarget(
+  project: VbaProject,
+  currentModule: VbaModule,
+  position: SourcePosition,
+  chain: MemberChainExpression
+): NameResolutionResult | undefined {
+  const resolved_segments = resolveMemberChain(project, currentModule, position, chain);
+  return resolved_segments?.at(-1)?.resolution;
+}
+
+function resolveMemberChain(
+  project: VbaProject,
+  currentModule: VbaModule,
+  position: SourcePosition,
+  chain: MemberChainExpression
+): ResolvedChainSegment[] | undefined {
+  const resolved_segments: ResolvedChainSegment[] = [];
+  const segments = chain.segments.slice(0, chain.targetSegmentIndex + 1);
+  if (segments.length === 0) {
+    return undefined;
+  }
+
+  let current_type_ref: TypeResolutionRef | undefined;
+  let segment_index = 0;
+
+  if (segments.length > 1) {
+    const source_qualified_member = resolveQualifiedModuleDefinition(
+      project,
+      currentModule,
+      segments[0].name,
+      segments[1].name
+    );
+    if (source_qualified_member !== undefined) {
+      current_type_ref = typeRefForVbaDefinition(project, currentModule, source_qualified_member, segments[1].hasCall, false);
+      resolved_segments.push({ resolution: toVbaResolution(source_qualified_member), typeRef: current_type_ref });
+      segment_index = 2;
+    } else {
+      const host_application = resolveHostApplicationQualifier(project, currentModule, segments[0].name);
+      const host_root = host_application === undefined
+        ? undefined
+        : singleMatch(project.hostDefinitions.filter((definition) =>
+          definition.hostApplication === host_application && sameName(definition.name, segments[1].name)
+        ));
+      if (host_root !== undefined) {
+        current_type_ref = typeRefForHostDefinition(host_root, segments[1].hasCall);
+        resolved_segments.push({ resolution: { source: 'host', definition: host_root }, typeRef: current_type_ref });
+        segment_index = 2;
+      }
+    }
+  }
+
+  if (segment_index === 0) {
+    const root_segment = resolveRootChainSegment(project, currentModule, position, segments[0]);
+    if (root_segment === undefined) {
+      return undefined;
+    }
+
+    current_type_ref = root_segment.typeRef;
+    resolved_segments.push(root_segment);
+    segment_index = 1;
+  }
+
+  while (segment_index < segments.length) {
+    if (current_type_ref === undefined) {
+      return undefined;
+    }
+
+    const member_segment = resolveMemberOnType(project, currentModule, current_type_ref, segments[segment_index]);
+    if (member_segment === undefined) {
+      return undefined;
+    }
+
+    current_type_ref = member_segment.typeRef;
+    resolved_segments.push(member_segment);
+    segment_index += 1;
+  }
+
+  return resolved_segments;
+}
+
+function resolveRootChainSegment(
+  project: VbaProject,
+  currentModule: VbaModule,
+  position: SourcePosition,
+  segment: MemberChainSegment
+): ResolvedChainSegment | undefined {
+  if (sameName(segment.name, 'Me')) {
+    if (currentModule.kind === 'standard') {
+      return undefined;
+    }
+
+    return {
+      typeRef: {
+        source: 'vba',
+        typeName: currentModule.identity,
+        allowPrivate: true
+      }
+    };
+  }
+
+  if (!segment.hasCall) {
+    const local_definition = resolveLocalDefinition(currentModule, position, segment.name);
+    if (local_definition?.typeName !== undefined) {
+      return {
+        resolution: toVbaResolution(local_definition),
+        typeRef: resolveTypeNameRef(project, currentModule, local_definition.typeName, false)
+      };
+    }
+  }
+
+  const current_module_definition = singleMatch(
+    currentModule.definitions
+      .filter((definition) => sameName(definition.name, segment.name))
+  );
+  if (current_module_definition !== undefined) {
+    return {
+      resolution: toVbaResolution(current_module_definition),
+      typeRef: typeRefForVbaDefinition(project, currentModule, current_module_definition, segment.hasCall, true)
+    };
+  }
+
+  const project_definition = singleMatch(
+    project.modules
+      .filter((module) => module.folderUri.toLowerCase() === currentModule.folderUri.toLowerCase())
+      .filter((module) => !sameUri(module.uri, currentModule.uri))
+      .flatMap((module) => module.definitions)
+      .filter((definition) => definition.visibility === 'public')
+      .filter((definition) => sameName(definition.name, segment.name))
+  );
+  if (project_definition !== undefined) {
+    return {
+      resolution: toVbaResolution(project_definition),
+      typeRef: typeRefForVbaDefinition(project, currentModule, project_definition, segment.hasCall, false)
+    };
+  }
+
+  const host_definition = selectUnqualifiedHostDefinition(
+    project,
+    project.hostDefinitions.filter((definition) => sameName(definition.name, segment.name))
+  );
+  if (host_definition !== undefined) {
+    return {
+      resolution: { source: 'host', definition: host_definition },
+      typeRef: typeRefForHostDefinition(host_definition, segment.hasCall)
+    };
+  }
+
+  return undefined;
+}
+
+function resolveMemberOnType(
+  project: VbaProject,
+  currentModule: VbaModule,
+  typeRef: TypeResolutionRef,
+  segment: MemberChainSegment
+): ResolvedChainSegment | undefined {
+  if (typeRef.source === 'host') {
+    const host_type = findHostTypeDefinition(project, currentModule, typeRef);
+    const host_member = singleMatch(host_type?.members?.filter((definition) =>
+      sameName(definition.name, segment.name)
+    ) ?? []);
+    return host_member === undefined
+      ? undefined
+      : {
+          resolution: { source: 'host', definition: host_member },
+          typeRef: typeRefForHostDefinition(host_member, segment.hasCall)
+        };
+  }
+
+  const project_type = findSourceTypeModule(project, currentModule, typeRef.typeName);
+  const project_member = singleMatch(project_type?.definitions
+    .filter((definition) => typeRef.allowPrivate || definition.visibility === 'public')
+    .filter((definition) => sameName(definition.name, segment.name)) ?? []);
+  return project_member === undefined
+    ? undefined
+    : {
+        resolution: toVbaResolution(project_member),
+        typeRef: typeRefForVbaDefinition(project, currentModule, project_member, segment.hasCall, false)
+      };
+}
+
+function typeRefForVbaDefinition(
+  project: VbaProject,
+  currentModule: VbaModule,
+  definition: VbaDefinition,
+  hasCall: boolean,
+  allowPrivate: boolean
+): TypeResolutionRef | undefined {
+  if (hasCall && definition.signature?.returnTypeName !== undefined) {
+    return resolveTypeNameRef(project, currentModule, definition.signature.returnTypeName, allowPrivate);
+  }
+  if (definition.typeName !== undefined) {
+    return resolveTypeNameRef(project, currentModule, definition.typeName, allowPrivate);
+  }
+
+  return undefined;
+}
+
+function typeRefForHostDefinition(
+  definition: HostDefinition,
+  hasCall: boolean
+): TypeResolutionRef | undefined {
+  const type_name = hasCall
+    ? definition.signature?.returnTypeName ?? definition.typeName
+    : definition.typeName ?? (definition.members === undefined ? undefined : definition.name);
+  return type_name === undefined
+    ? undefined
+    : {
+        source: 'host',
+        typeName: type_name,
+        hostApplication: definition.hostApplication
+      };
+}
+
+function resolveTypeNameRef(
+  project: VbaProject,
+  currentModule: VbaModule,
+  typeName: string,
+  allowPrivate: boolean
+): TypeResolutionRef | undefined {
+  const host_type = resolveHostQualifiedPath(project, currentModule, typeName);
+  if (host_type !== undefined) {
+    return {
+      source: 'host',
+      typeName: host_type.name,
+      hostApplication: host_type.hostApplication
+    };
+  }
+
+  const source_type = findSourceTypeModule(project, currentModule, typeName);
+  if (source_type !== undefined) {
+    return {
+      source: 'vba',
+      typeName: source_type.identity,
+      allowPrivate
+    };
+  }
+
+  const unqualified_host_type = selectUnqualifiedHostDefinition(
+    project,
+    project.hostDefinitions.filter((definition) => sameName(definition.name, typeName))
+  );
+  return unqualified_host_type === undefined
+    ? undefined
+    : {
+        source: 'host',
+        typeName: unqualified_host_type.name,
+        hostApplication: unqualified_host_type.hostApplication
+      };
+}
+
+function findSourceTypeModule(
+  project: VbaProject,
+  currentModule: VbaModule,
+  typeName: string
+): VbaModule | undefined {
+  if (typeName.includes('.')) {
+    return undefined;
+  }
+
+  return project.modules.find((module) =>
+    module.folderUri.toLowerCase() === currentModule.folderUri.toLowerCase()
+      && sameName(module.identity, typeName)
+  );
+}
+
+function findHostTypeDefinition(
+  project: VbaProject,
+  currentModule: VbaModule,
+  typeRef: Extract<TypeResolutionRef, { source: 'host' }>
+): HostDefinition | undefined {
+  const host_qualified_type = resolveHostQualifiedPath(project, currentModule, typeRef.typeName);
+  if (host_qualified_type !== undefined) {
+    return host_qualified_type;
+  }
+
+  if (typeRef.hostApplication !== undefined) {
+    return singleMatch(project.hostDefinitions.filter((definition) =>
+      definition.hostApplication === typeRef.hostApplication && sameName(definition.name, typeRef.typeName)
+    ));
+  }
+
+  return selectUnqualifiedHostDefinition(
+    project,
+    project.hostDefinitions.filter((definition) => sameName(definition.name, typeRef.typeName))
+  );
+}
+
 function getMembersForType(
   project: VbaProject,
   currentModule: VbaModule,
   typeName: string
 ): { name: string; kind: CompletionEntryKind; detail?: string }[] {
-  const host_type = resolveHostQualifiedPath(project, currentModule, typeName)
-    ?? selectUnqualifiedHostDefinition(
-      project,
-      project.hostDefinitions.filter((definition) => sameName(definition.name, typeName))
-    );
-  if (host_type?.members !== undefined) {
+  const type_ref = resolveTypeNameRef(project, currentModule, typeName, false);
+  return type_ref === undefined ? [] : getMembersForResolvedType(project, currentModule, type_ref);
+}
+
+function getMembersForResolvedType(
+  project: VbaProject,
+  currentModule: VbaModule,
+  typeRef: TypeResolutionRef
+): { name: string; kind: CompletionEntryKind; detail?: string }[] {
+  if (typeRef.source === 'host') {
+    const host_type = findHostTypeDefinition(project, currentModule, typeRef);
+    if (host_type?.members === undefined) {
+      return [];
+    }
+
     return host_type.members.map((member) => ({
       name: member.name,
       kind: completionKindForHostDefinition(member),
@@ -1632,13 +2255,10 @@ function getMembersForType(
     }));
   }
 
-  const project_type = project.modules.find((module) =>
-    module.folderUri.toLowerCase() === currentModule.folderUri.toLowerCase()
-      && sameName(module.identity, typeName)
-  );
+  const project_type = findSourceTypeModule(project, currentModule, typeRef.typeName);
   if (project_type !== undefined) {
     return project_type.definitions
-      .filter((definition) => definition.visibility === 'public')
+      .filter((definition) => typeRef.allowPrivate || definition.visibility === 'public')
       .map((definition) => ({
         name: definition.name,
         kind: completionKindForVbaDefinition(definition)
@@ -2025,26 +2645,67 @@ function getQualifiedReferenceAt(
 function getCallExpressionAt(
   lines: string[],
   position: SourcePosition
-): { name: string; nameStart: number; activeParameter: number } | undefined {
+): CallExpression | undefined {
   const line = lines[position.line] ?? '';
-  const text_before_position = line.slice(0, position.character);
-  const open_paren = text_before_position.lastIndexOf('(');
-  if (open_paren === -1) {
+  const effective_character = Math.min(position.character, line.length);
+  const open_paren = findActiveCallOpenParen(line, effective_character);
+  if (open_paren === undefined) {
     return undefined;
   }
 
-  const before_paren = text_before_position.slice(0, open_paren);
-  const match = /(?:\bCall\s+)?(?:[A-Za-z_][A-Za-z0-9_]*\.)?([A-Za-z_][A-Za-z0-9_]*)\s*$/i.exec(before_paren);
-  if (match === null) {
+  const chain = parseMemberChainEndingBefore(line, position.line, open_paren);
+  const target_segment = chain?.segments.at(-1);
+  if (target_segment === undefined) {
     return undefined;
   }
 
-  const name = match[1];
   return {
-    name,
-    nameStart: before_paren.lastIndexOf(name),
-    activeParameter: countCommas(text_before_position.slice(open_paren + 1))
+    name: target_segment.name,
+    nameStart: target_segment.range.start.character,
+    activeParameter: countCommas(line.slice(open_paren + 1, effective_character)),
+    chain
   };
+}
+
+function findActiveCallOpenParen(line: string, positionCharacter: number): number | undefined {
+  const open_parens: number[] = [];
+  let character_index = 0;
+  let is_in_string = false;
+
+  while (character_index < positionCharacter) {
+    const character = line[character_index];
+    if (is_in_string) {
+      if (character === '"') {
+        if (line[character_index + 1] === '"') {
+          character_index += 2;
+        } else {
+          is_in_string = false;
+          character_index += 1;
+        }
+      } else {
+        character_index += 1;
+      }
+      continue;
+    }
+
+    if (character === "'") {
+      break;
+    }
+    if (character === '"') {
+      is_in_string = true;
+      character_index += 1;
+      continue;
+    }
+    if (character === '(') {
+      open_parens.push(character_index);
+    } else if (character === ')') {
+      open_parens.pop();
+    }
+
+    character_index += 1;
+  }
+
+  return open_parens.at(-1);
 }
 
 function countCommas(text: string): number {

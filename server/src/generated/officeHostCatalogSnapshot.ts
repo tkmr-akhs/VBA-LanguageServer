@@ -21,7 +21,20 @@ export const C_OFFICE_HOST_CATALOG_SNAPSHOT: Partial<Record<HostApplication, Hos
       documentation: 'Represents an Excel workbook.',
       members: [
         { name: 'Name', kind: 'property', documentation: 'Returns the workbook name.', typeName: 'String' },
-        { name: 'Worksheets', kind: 'property', documentation: 'Returns the Worksheets collection.', typeName: 'Worksheets' }
+        {
+          name: 'Worksheets',
+          kind: 'property',
+          documentation: 'Returns the Worksheets collection.',
+          typeName: 'Worksheets',
+          signature: {
+            label: 'Worksheets(Index) As Worksheet',
+            returnTypeName: 'Worksheet',
+            documentation: 'Returns a worksheet by name or index.',
+            parameters: [
+              { name: 'Index', typeName: 'Variant', documentation: 'The worksheet name or index.' }
+            ]
+          }
+        }
       ]
     },
     {
@@ -88,6 +101,28 @@ export const C_OFFICE_HOST_CATALOG_SNAPSHOT: Partial<Record<HostApplication, Hos
             parameters: [
               { name: 'MacroName', typeName: 'String', documentation: 'The name of the macro to run.' },
               { name: 'Arg1', label: 'Optional Arg1', optional: true, typeName: 'Variant' }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      name: 'Documents',
+      kind: 'class',
+      documentation: 'Represents the Word documents collection.',
+      members: [
+        {
+          name: 'Open',
+          kind: 'function',
+          documentation: 'Opens a Word document.',
+          typeName: 'Document',
+          signature: {
+            label: 'Open(FileName, Optional ConfirmConversions) As Document',
+            returnTypeName: 'Document',
+            documentation: 'Opens a Word document.',
+            parameters: [
+              { name: 'FileName', typeName: 'String', documentation: 'The document file name.' },
+              { name: 'ConfirmConversions', label: 'Optional ConfirmConversions', optional: true, typeName: 'Variant' }
             ]
           }
         }

@@ -135,6 +135,70 @@ test('successful selected COM refresh writes only the selected host cache', asyn
   );
 });
 
+test('selected refresh enriches host catalogs with Type Library signature metadata', async () => {
+  let written_definitions: HostDefinition[] | undefined;
+  const manager = new HostCatalogManager({
+    platform: 'win32',
+    readCache: () => undefined,
+    writeCache: (_hostApplication, _cachePath, definitions) => {
+      written_definitions = definitions;
+    },
+    discoverFromCom: async () => [
+      {
+        name: 'Range',
+        kind: 'class',
+        members: [
+          { name: 'Find', kind: 'function' },
+          { name: 'Clear', kind: 'function' }
+        ]
+      }
+    ],
+    discoverSignaturesFromTypeLibrary: async () => [
+      {
+        name: 'Range',
+        kind: 'class',
+        members: [
+          {
+            name: 'Find',
+            kind: 'function',
+            typeName: 'Range',
+            signature: {
+              label: 'Find(What) As Range',
+              returnTypeName: 'Range',
+              parameters: [{ name: 'What', typeName: 'Variant' }]
+            }
+          }
+        ]
+      }
+    ]
+  });
+
+  await manager.refreshSelectedHostApplicationsFromComAsync({ mainHostApplication: 'excel' });
+
+  assert.deepEqual(manager.getDefinitions({ mainHostApplication: 'excel' }), [
+    {
+      name: 'Range',
+      kind: 'class',
+      hostApplication: 'excel',
+      members: [
+        {
+          name: 'Find',
+          kind: 'function',
+          hostApplication: 'excel',
+          typeName: 'Range',
+          signature: {
+            label: 'Find(What) As Range',
+            returnTypeName: 'Range',
+            parameters: [{ name: 'What', typeName: 'Variant' }]
+          }
+        },
+        { name: 'Clear', kind: 'function', hostApplication: 'excel' }
+      ]
+    }
+  ]);
+  assert.deepEqual(written_definitions, manager.getDefinitions({ mainHostApplication: 'excel' }));
+});
+
 test('COM refresh is skipped outside Windows and preserves bundled fallback', async () => {
   const discovery_calls: HostApplication[] = [];
   const manager = new HostCatalogManager({

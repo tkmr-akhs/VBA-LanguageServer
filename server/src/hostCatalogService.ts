@@ -10,6 +10,7 @@ import {
   getBundledHostDefinitionsForApplication,
   type HostApplicationSelectionOptions
 } from './officeHostCatalog';
+import { discoverHostSignaturesFromTypeLibrary } from './hostSignatureDiscovery';
 import type { HostApplication, HostDefinition } from './vbaProject';
 
 const execFileAsync = promisify(execFile);
@@ -33,6 +34,7 @@ export interface HostCatalogManagerOptions {
   readCache?: HostCatalogCacheReader;
   writeCache?: HostCatalogCacheWriter;
   discoverFromCom?: HostCatalogComDiscovery;
+  discoverSignaturesFromTypeLibrary?: HostCatalogComDiscovery;
 }
 
 export class HostCatalogManager {
@@ -42,6 +44,7 @@ export class HostCatalogManager {
   private readonly readCache?: HostCatalogCacheReader;
   private readonly writeCache?: HostCatalogCacheWriter;
   private readonly discoverFromCom: HostCatalogComDiscovery;
+  private readonly discoverSignaturesFromTypeLibrary: HostCatalogComDiscovery;
   private readonly refreshAttempts = new Set<HostApplication>();
   private readonly refreshesInFlight = new Map<HostApplication, Promise<void>>();
 
@@ -51,6 +54,8 @@ export class HostCatalogManager {
     this.readCache = options.readCache;
     this.writeCache = options.writeCache;
     this.discoverFromCom = options.discoverFromCom ?? discoverOfficeComHostDefinitions;
+    this.discoverSignaturesFromTypeLibrary = options.discoverSignaturesFromTypeLibrary
+      ?? discoverHostSignaturesFromTypeLibrary;
 
     for (const host_application of C_SUPPORTED_HOST_APPLICATIONS) {
       this.definitionsByApplication.set(
@@ -109,11 +114,25 @@ export class HostCatalogManager {
         return;
       }
 
-      const definitions = cloneHostDefinitionsWithApplication(discovered_definitions, hostApplication);
+      const signature_definitions = await this.discoverSignaturesFromTypeLibrarySafely(hostApplication);
+      const definitions = cloneHostDefinitionsWithApplication(
+        mergeHostDefinitions(discovered_definitions, signature_definitions),
+        hostApplication
+      );
       this.definitionsByApplication.set(hostApplication, definitions);
       await this.writeCacheSafely(hostApplication, definitions);
     } catch {
       return;
+    }
+  }
+
+  private async discoverSignaturesFromTypeLibrarySafely(
+    hostApplication: HostApplication
+  ): Promise<HostDefinition[]> {
+    try {
+      return await this.discoverSignaturesFromTypeLibrary(hostApplication);
+    } catch {
+      return [];
     }
   }
 
@@ -177,6 +196,53 @@ function readHostCatalogCache(cachePath: string): HostDefinition[] | undefined {
 function writeHostCatalogCache(cachePath: string, definitions: HostDefinition[]): void {
   fs.mkdirSync(path.dirname(cachePath), { recursive: true });
   fs.writeFileSync(cachePath, `${JSON.stringify(definitions, null, 2)}\n`, 'utf8');
+}
+
+function mergeHostDefinitions(
+  baseDefinitions: HostDefinition[],
+  enrichmentDefinitions: HostDefinition[]
+): HostDefinition[] {
+  const merged_definitions = baseDefinitions.map((definition) =>
+    mergeHostDefinition(
+      definition,
+      enrichmentDefinitions.find((candidate) => sameName(candidate.name, definition.name))
+    )
+  );
+  const base_names = new Set(baseDefinitions.map((definition) => definition.name.toLowerCase()));
+  return [
+    ...merged_definitions,
+    ...enrichmentDefinitions.filter((definition) => !base_names.has(definition.name.toLowerCase()))
+  ];
+}
+
+function mergeHostDefinition(
+  baseDefinition: HostDefinition,
+  enrichmentDefinition: HostDefinition | undefined
+): HostDefinition {
+  if (enrichmentDefinition === undefined) {
+    return cloneHostDefinition(baseDefinition);
+  }
+
+  const merged_definition: HostDefinition = {
+    ...baseDefinition
+  };
+  if (enrichmentDefinition.documentation !== undefined) {
+    merged_definition.documentation = enrichmentDefinition.documentation;
+  }
+  if (enrichmentDefinition.typeName !== undefined) {
+    merged_definition.typeName = enrichmentDefinition.typeName;
+  }
+  if (enrichmentDefinition.signature !== undefined) {
+    merged_definition.signature = enrichmentDefinition.signature;
+  }
+  if (baseDefinition.members !== undefined || enrichmentDefinition.members !== undefined) {
+    merged_definition.members = mergeHostDefinitions(
+      baseDefinition.members ?? [],
+      enrichmentDefinition.members ?? []
+    );
+  }
+
+  return merged_definition;
 }
 
 async function discoverOfficeComHostDefinitions(hostApplication: HostApplication): Promise<HostDefinition[]> {
@@ -416,4 +482,8 @@ function isHostDefinitionKind(value: unknown): boolean {
 function isHostApplication(value: unknown): value is HostApplication {
   return typeof value === 'string'
     && (C_SUPPORTED_HOST_APPLICATIONS as readonly string[]).includes(value);
+}
+
+function sameName(left: string, right: string): boolean {
+  return left.toLowerCase() === right.toLowerCase();
 }

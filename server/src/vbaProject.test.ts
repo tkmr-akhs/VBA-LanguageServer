@@ -2205,6 +2205,306 @@ test('signature help displays documented parameters and return value for parenth
   });
 });
 
+test('signature help displays source CallableSignature parameter metadata when available', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        "'* @brief Reads a value.",
+        "'* @param Key Key to read.",
+        "'* @return The configured value.",
+        'Public Function ReadValue(ByVal Key As String, Optional ByRef Fallback As String = "n/a") As String',
+        'End Function',
+        '',
+        'Public Sub Run()',
+        '    ReadValue("id", ',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  const signatureHelp = getSignatureHelp(project, {
+    uri: 'file:///project/Worker.bas',
+    position: { line: 10, character: 20 }
+  });
+
+  assert.deepEqual(signatureHelp, {
+    label: 'ReadValue(Key, Optional Fallback) As String',
+    activeParameter: 1,
+    documentation: [
+      'Reads a value.',
+      '',
+      '@return The configured value.'
+    ].join('\n'),
+    parameters: [
+      {
+        label: 'Key',
+        documentation: 'Key to read.'
+      },
+      {
+        label: 'Optional Fallback',
+        documentation: 'String Optional. Default: "n/a".'
+      }
+    ]
+  });
+});
+
+test('signature help displays HostDefinition CallableSignature for typed host method calls', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    Dim rng As Range',
+        '    rng.Find "outside signature help"',
+        '    rng.Find("needle", ',
+        'End Sub'
+      ].join('\n')
+    }
+  ], {
+    hostDefinitions: [
+      {
+        name: 'Range',
+        kind: 'class',
+        hostApplication: 'excel',
+        members: [
+          {
+            name: 'Find',
+            kind: 'function',
+            hostApplication: 'excel',
+            typeName: 'Range',
+            signature: {
+              label: 'Find(What, Optional After) As Range',
+              returnTypeName: 'Range',
+              documentation: 'Finds specific information in a range.',
+              parameters: [
+                {
+                  name: 'What',
+                  typeName: 'Variant',
+                  documentation: 'The data to search for.'
+                },
+                {
+                  name: 'After',
+                  label: 'Optional After',
+                  optional: true,
+                  typeName: 'Variant',
+                  documentation: 'The cell after which the search begins.'
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  });
+
+  const signatureHelp = getSignatureHelp(project, {
+    uri: 'file:///project/Worker.bas',
+    position: { line: 6, character: 23 }
+  });
+
+  assert.deepEqual(signatureHelp, {
+    label: 'Find(What, Optional After) As Range',
+    activeParameter: 1,
+    documentation: 'Finds specific information in a range.',
+    parameters: [
+      {
+        label: 'What',
+        documentation: 'The data to search for.'
+      },
+      {
+        label: 'Optional After',
+        documentation: 'The cell after which the search begins.'
+      }
+    ]
+  });
+});
+
+test('signature help uses bundled HostSignatureDiscovery snapshot metadata', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    Dim rng As Range',
+        '    rng.Find("needle", ',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  const signatureHelp = getSignatureHelp(project, {
+    uri: 'file:///project/Worker.bas',
+    position: { line: 5, character: 23 }
+  });
+
+  assert.deepEqual(signatureHelp, {
+    label: 'Find(What, Optional After, Optional LookIn, Optional LookAt, Optional SearchOrder, Optional SearchDirection, Optional MatchCase, Optional MatchByte, Optional SearchFormat) As Range',
+    activeParameter: 1,
+    documentation: 'Finds specific information in a range.',
+    parameters: [
+      {
+        label: 'What',
+        documentation: 'Variant. The data to search for.'
+      },
+      {
+        label: 'Optional After',
+        documentation: 'Variant. The cell after which the search begins.'
+      },
+      {
+        label: 'Optional LookIn',
+        documentation: 'Variant. The type of information to search.'
+      },
+      {
+        label: 'Optional LookAt',
+        documentation: 'Variant. Can be xlWhole or xlPart.'
+      },
+      {
+        label: 'Optional SearchOrder',
+        documentation: 'Variant. Can be xlByRows or xlByColumns.'
+      },
+      {
+        label: 'Optional SearchDirection',
+        documentation: 'Variant. Can be xlNext or xlPrevious.'
+      },
+      {
+        label: 'Optional MatchCase',
+        documentation: 'Variant. True to make the search case-sensitive.'
+      },
+      {
+        label: 'Optional MatchByte',
+        documentation: 'Variant. Used for double-byte language support.'
+      },
+      {
+        label: 'Optional SearchFormat',
+        documentation: 'Variant. The search format.'
+      }
+    ]
+  });
+});
+
+test('signature help displays HostDefinition CallableSignature for host-qualified type annotations', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    Dim app As Word.Application',
+        '    app.Run "outside signature help"',
+        '    app.Run("MacroName", ',
+        'End Sub'
+      ].join('\n')
+    }
+  ], {
+    mainHostApplication: 'word',
+    hostDefinitions: [
+      {
+        name: 'Application',
+        kind: 'class',
+        hostApplication: 'word',
+        members: [
+          {
+            name: 'Run',
+            kind: 'function',
+            hostApplication: 'word',
+            typeName: 'Variant',
+            signature: {
+              label: 'Run(MacroName, Optional Arg1) As Variant',
+              returnTypeName: 'Variant',
+              documentation: 'Runs a macro.',
+              parameters: [
+                {
+                  name: 'MacroName',
+                  typeName: 'String',
+                  documentation: 'The name of the macro to run.'
+                },
+                {
+                  name: 'Arg1',
+                  label: 'Optional Arg1',
+                  optional: true,
+                  typeName: 'Variant'
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  });
+
+  const signatureHelp = getSignatureHelp(project, {
+    uri: 'file:///project/Worker.bas',
+    position: { line: 6, character: 25 }
+  });
+
+  assert.deepEqual(signatureHelp, {
+    label: 'Run(MacroName, Optional Arg1) As Variant',
+    activeParameter: 1,
+    documentation: 'Runs a macro.',
+    parameters: [
+      {
+        label: 'MacroName',
+        documentation: 'The name of the macro to run.'
+      },
+      {
+        label: 'Optional Arg1',
+        documentation: 'Variant Optional.'
+      }
+    ]
+  });
+});
+
+test('signature help ignores host methods without CallableSignature metadata', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    Dim rng As Range',
+        '    rng.Clear(',
+        'End Sub'
+      ].join('\n')
+    }
+  ], {
+    hostDefinitions: [
+      {
+        name: 'Range',
+        kind: 'class',
+        hostApplication: 'excel',
+        members: [
+          {
+            name: 'Clear',
+            kind: 'function',
+            hostApplication: 'excel'
+          }
+        ]
+      }
+    ]
+  });
+
+  const signatureHelp = getSignatureHelp(project, {
+    uri: 'file:///project/Worker.bas',
+    position: { line: 5, character: 14 }
+  });
+
+  assert.equal(signatureHelp, undefined);
+});
+
 test('ordinary apostrophe comments are ignored by hover and signature help', () => {
   const project = buildVbaProject([
     {

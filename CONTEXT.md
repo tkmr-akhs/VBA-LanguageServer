@@ -65,6 +65,14 @@ _Avoid_: automatic typing, on-type edit
 A structured Doxygen-style VBA comment block attached to a `VbaDefinition` and shown by editor features such as hover and signature help regardless of public or private visibility. Plain apostrophe comments are not `DocumentationComment`s; when an implementation member has no `DocumentationComment`, it may inherit one from the interface member named by its `Implements` relationship.
 _Avoid_: comment, note, description
 
+**CallableSignature**:
+The structured call shape for a callable `VbaDefinition` or `HostDefinition`. It includes the displayed signature label, ordered parameters, optional parameter metadata, parameter passing metadata, parameter type names, default values, return type names, and parameter documentation when that documentation is available from source comments or host catalog metadata.
+_Avoid_: parameter list, call text, method shape
+
+**HostSignatureDiscovery**:
+The process of collecting `CallableSignature` and type metadata for `HostDefinition`s from an available `HostApplication` catalog source. It enriches host metadata so editor features can show accurate signature help without guessing signatures from member names alone.
+_Avoid_: COM refresh, member scan, metadata scrape
+
 **RenameTarget**:
 A source-defined `VbaDefinition` that can be renamed inside its `VbaProject`. `HostDefinition`s, string literals, and `DocumentationComment`s are not `RenameTarget`s.
 _Avoid_: renameable symbol, edit target

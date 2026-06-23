@@ -100,6 +100,19 @@ test('extension contributes additional HostApplications configuration', () => {
   });
 });
 
+test('README documents host signature help metadata dependency', () => {
+  const readme = fs.readFileSync(path.join(process.cwd(), 'README.md'), 'utf8');
+
+  assert.match(
+    readme,
+    /Detailed host method signature help depends on available host catalog metadata\./
+  );
+  assert.match(
+    readme,
+    /When a host method has no signature\s+metadata, the server leaves signature help empty/
+  );
+});
+
 test('VBA TextMate grammar has lexical scopes for representative VBA fixtures', () => {
   const grammar = readGrammar();
   const patterns = flattenPatterns(grammar);

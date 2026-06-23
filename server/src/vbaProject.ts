@@ -51,11 +51,31 @@ export type CompletionEntryKind =
 export type HostDefinitionKind = 'class' | 'property' | 'function' | 'enum' | 'enumMember';
 export type HostApplication = 'excel' | 'word' | 'powerpoint' | 'access';
 
+export interface CallableParameter {
+  name: string;
+  label?: string;
+  documentation?: string;
+  optional?: boolean;
+  passingMode?: 'ByVal' | 'ByRef';
+  isParamArray?: boolean;
+  typeName?: string;
+  defaultValue?: string;
+}
+
+export interface CallableSignature {
+  label: string;
+  parameters: CallableParameter[];
+  returnTypeName?: string;
+  documentation?: string;
+}
+
 export interface HostDefinition {
   name: string;
   kind?: HostDefinitionKind;
   hostApplication?: HostApplication;
   documentation?: string;
+  typeName?: string;
+  signature?: CallableSignature;
   members?: HostDefinition[];
 }
 
@@ -165,8 +185,12 @@ interface VbaDefinition {
   range: SourceRange;
   children?: VbaDefinition[];
   documentation?: DocumentationComment;
-  signature?: SignatureInfo;
+  signature?: CallableSignature;
   typeName?: string;
+  optional?: boolean;
+  passingMode?: 'ByVal' | 'ByRef';
+  isParamArray?: boolean;
+  defaultValue?: string;
 }
 
 interface DocumentationComment {
@@ -174,11 +198,6 @@ interface DocumentationComment {
   details: string[];
   params: string[];
   returns?: string;
-}
-
-interface SignatureInfo {
-  label: string;
-  parameters: string[];
 }
 
 interface ProcedureScope {
@@ -532,26 +551,18 @@ export function getSignatureHelp(
       character: call_expression.nameStart
     }
   });
-  if (resolution?.source !== 'vba') {
+  if (resolution === undefined) {
     return undefined;
+  }
+
+  if (resolution.source === 'host') {
+    return getHostSignatureHelp(resolution.definition, call_expression.activeParameter);
   }
 
   const definition = findDefinitionByLocation(project, resolution.definition);
-  if (definition?.signature === undefined) {
-    return undefined;
-  }
-
-  const documentation = findDocumentationForDefinition(project, definition);
-  const parameter_docs = getParameterDocumentation(documentation);
-  return {
-    label: definition.signature.label,
-    activeParameter: Math.min(call_expression.activeParameter, Math.max(definition.signature.parameters.length - 1, 0)),
-    documentation: renderSignatureDocumentation(documentation),
-    parameters: definition.signature.parameters.map((parameter) => ({
-      label: parameter,
-      documentation: parameter_docs.get(parameter.toLowerCase())
-    }))
-  };
+  return definition?.signature === undefined
+    ? undefined
+    : getSourceSignatureHelp(project, definition, call_expression.activeParameter);
 }
 
 export function getDefinition(
@@ -1341,6 +1352,8 @@ function parseParameterDefinitions(
       const name = match[1];
       const name_start = line.indexOf(name, segment_start);
       const type_match = new RegExp(`\\bAs\\s+(${C_TYPE_NAME_PATTERN.source})\\b`, 'i').exec(trimmed_segment);
+      const passing_mode_match = /\b(ByVal|ByRef)\b/i.exec(trimmed_segment);
+      const default_value_match = /=\s*(.+)\s*$/.exec(trimmed_segment);
       definitions.push({
         name,
         kind: 'parameter',
@@ -1350,7 +1363,13 @@ function parseParameterDefinitions(
           start: { line: line_index, character: name_start },
           end: { line: line_index, character: name_start + name.length }
         },
-        typeName: type_match?.[1]
+        typeName: type_match?.[1],
+        optional: /\bOptional\b/i.test(trimmed_segment),
+        passingMode: passing_mode_match === null
+          ? undefined
+          : canonicalPassingMode(passing_mode_match[1]),
+        isParamArray: /\bParamArray\b/i.test(trimmed_segment),
+        defaultValue: default_value_match?.[1].trim()
       });
     }
 
@@ -1364,15 +1383,37 @@ function buildSignatureInfo(
   line: string,
   name: string,
   parameterDefinitions: VbaDefinition[]
-): SignatureInfo {
-  const parameters = parameterDefinitions.map((parameter) => parameter.name);
+): CallableSignature {
+  const parameters = parameterDefinitions.map((parameter) => ({
+    name: parameter.name,
+    label: formatCallableParameterLabel(parameter),
+    optional: parameter.optional,
+    passingMode: parameter.passingMode,
+    isParamArray: parameter.isParamArray,
+    typeName: parameter.typeName,
+    defaultValue: parameter.defaultValue
+  }));
   const return_type_name = parseReturnTypeName(line);
   const return_suffix = return_type_name === undefined ? '' : ` As ${return_type_name}`;
 
   return {
-    label: `${name}(${parameters.join(', ')})${return_suffix}`,
-    parameters
+    label: `${name}(${parameters.map((parameter) => parameter.label ?? parameter.name).join(', ')})${return_suffix}`,
+    parameters,
+    returnTypeName: return_type_name
   };
+}
+
+function canonicalPassingMode(value: string): 'ByVal' | 'ByRef' {
+  return value.toLowerCase() === 'byval' ? 'ByVal' : 'ByRef';
+}
+
+function formatCallableParameterLabel(parameter: VbaDefinition): string {
+  const modifiers = [
+    parameter.isParamArray === true ? 'ParamArray' : undefined,
+    parameter.optional === true ? 'Optional' : undefined
+  ].filter((modifier) => modifier !== undefined);
+
+  return [...modifiers, parameter.name].join(' ');
 }
 
 function parseReturnTypeName(line: string): string | undefined {
@@ -2083,6 +2124,58 @@ function findDefinitionByLocation(
     );
 }
 
+function getSourceSignatureHelp(
+  project: VbaProject,
+  definition: VbaDefinition,
+  activeParameter: number
+): SignatureHelpResult | undefined {
+  if (definition.signature === undefined) {
+    return undefined;
+  }
+
+  const documentation = findDocumentationForDefinition(project, definition);
+  const parameter_docs = getParameterDocumentation(documentation);
+  return toSignatureHelpResult(
+    definition.signature,
+    activeParameter,
+    renderSignatureDocumentation(documentation),
+    (parameter) => parameter_docs.get(parameter.name.toLowerCase()) ?? renderSourceCallableParameterMetadata(parameter)
+  );
+}
+
+function getHostSignatureHelp(
+  definition: HostDefinition,
+  activeParameter: number
+): SignatureHelpResult | undefined {
+  if (definition.signature === undefined) {
+    return undefined;
+  }
+
+  return toSignatureHelpResult(
+    definition.signature,
+    activeParameter,
+    definition.signature.documentation ?? definition.documentation,
+    (parameter) => parameter.documentation ?? renderCallableParameterMetadata(parameter)
+  );
+}
+
+function toSignatureHelpResult(
+  signature: CallableSignature,
+  activeParameter: number,
+  documentation: string | undefined,
+  getParameterDocumentation: (parameter: CallableParameter) => string | undefined
+): SignatureHelpResult {
+  return {
+    label: signature.label,
+    activeParameter: Math.min(activeParameter, Math.max(signature.parameters.length - 1, 0)),
+    documentation,
+    parameters: signature.parameters.map((parameter) => ({
+      label: parameter.label ?? parameter.name,
+      documentation: getParameterDocumentation(parameter)
+    }))
+  };
+}
+
 function getAllVbaDefinitions(project: VbaProject): VbaDefinition[] {
   return project.modules.flatMap((module) => [
     ...module.definitions,
@@ -2178,6 +2271,26 @@ function renderSignatureDocumentation(documentation: DocumentationComment | unde
   }
 
   return sections.length === 0 ? undefined : sections.join('\n\n');
+}
+
+function renderCallableParameterMetadata(parameter: CallableParameter): string | undefined {
+  const sections = [
+    parameter.typeName,
+    parameter.optional === true ? 'Optional.' : undefined,
+    parameter.defaultValue === undefined ? undefined : `Default: ${parameter.defaultValue}.`
+  ].filter((section) => section !== undefined && section !== '');
+
+  return sections.length === 0 ? undefined : sections.join(' ');
+}
+
+function renderSourceCallableParameterMetadata(parameter: CallableParameter): string | undefined {
+  if (parameter.optional !== true
+    && parameter.isParamArray !== true
+    && parameter.defaultValue === undefined) {
+    return undefined;
+  }
+
+  return renderCallableParameterMetadata(parameter);
 }
 
 function getParameterDocumentation(documentation: DocumentationComment | undefined): Map<string, string> {

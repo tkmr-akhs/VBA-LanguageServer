@@ -1,4 +1,5 @@
 import type { HostApplication, HostDefinition } from './vbaProject';
+import { C_OFFICE_HOST_CATALOG_SNAPSHOT } from './generated/officeHostCatalogSnapshot';
 
 export const C_DEFAULT_MAIN_HOST_APPLICATION: HostApplication = 'excel';
 export const C_SUPPORTED_HOST_APPLICATIONS: readonly HostApplication[] = [
@@ -211,7 +212,9 @@ export function createHostApplicationSelection(
 
 export function getBundledHostDefinitionsForApplication(hostApplication: HostApplication): HostDefinition[] {
   return cloneHostDefinitionsWithApplication(
-    bundledHostDefinitionsByApplication[hostApplication] ?? [],
+    C_OFFICE_HOST_CATALOG_SNAPSHOT[hostApplication]
+      ?? bundledHostDefinitionsByApplication[hostApplication]
+      ?? [],
     hostApplication
   );
 }

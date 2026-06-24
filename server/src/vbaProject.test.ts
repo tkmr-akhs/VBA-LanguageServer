@@ -3377,6 +3377,261 @@ test('signature help displays documented parameters and return value for parenth
   });
 });
 
+test('signature help remains active for source continued argument lists', () => {
+  const active_line = '        ';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        "'* @brief Reads a value.",
+        "'* @param Key Key to read.",
+        "'* @param Fallback Value used when the key is missing.",
+        "'* @return The configured value.",
+        'Public Function ReadValue(ByVal Key As String, ByVal Fallback As String) As String',
+        'End Function',
+        '',
+        'Public Sub Run()',
+        '    ReadValue( _',
+        '        "id", _',
+        active_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  const signatureHelp = getSignatureHelp(project, {
+    uri: 'file:///project/Worker.bas',
+    position: { line: 13, character: active_line.length }
+  });
+
+  assert.deepEqual(signatureHelp, {
+    label: 'ReadValue(Key, Fallback) As String',
+    activeParameter: 1,
+    documentation: [
+      'Reads a value.',
+      '',
+      '@return The configured value.'
+    ].join('\n'),
+    parameters: [
+      {
+        label: 'Key',
+        documentation: 'Key to read.'
+      },
+      {
+        label: 'Fallback',
+        documentation: 'Value used when the key is missing.'
+      }
+    ]
+  });
+});
+
+test('signature help counts only top-level continued argument separators before the cursor', () => {
+  const cursor_prefix = '        ';
+  const active_line = `${cursor_prefix}BuildTail(1, 2), "after"`;
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        'Public Sub Invoke(ByVal First As String, ByVal Second As Variant, ByVal Third As Variant, ByVal Fourth As Variant, ByVal Fifth As Variant)',
+        'End Sub',
+        '',
+        'Public Function BuildValue(ByVal Left As Integer, ByVal Right As Integer) As Variant',
+        'End Function',
+        '',
+        'Public Function BuildTail(ByVal Left As Integer, ByVal Right As Integer) As Variant',
+        'End Function',
+        '',
+        'Public Sub Run()',
+        '    Invoke( _',
+        '        "a,b", _',
+        '        BuildValue(1, 2), _',
+        active_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  const signatureHelp = getSignatureHelp(project, {
+    uri: 'file:///project/Worker.bas',
+    position: { line: 16, character: cursor_prefix.length }
+  });
+
+  assert.deepEqual(signatureHelp, {
+    label: 'Invoke(First, Second, Third, Fourth, Fifth)',
+    activeParameter: 2,
+    documentation: undefined,
+    parameters: [
+      { label: 'First', documentation: undefined },
+      { label: 'Second', documentation: undefined },
+      { label: 'Third', documentation: undefined },
+      { label: 'Fourth', documentation: undefined },
+      { label: 'Fifth', documentation: undefined }
+    ]
+  });
+});
+
+test('signature help uses the innermost continued nested call at the cursor', () => {
+  const active_line = '            ';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        'Public Sub Outer(ByVal First As Variant, ByVal Second As Variant)',
+        'End Sub',
+        '',
+        'Public Function Inner(ByVal Key As String, ByVal Fallback As String) As Variant',
+        'End Function',
+        '',
+        'Public Sub Run()',
+        '    Outer( _',
+        '        Inner( _',
+        active_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  const signatureHelp = getSignatureHelp(project, {
+    uri: 'file:///project/Worker.bas',
+    position: { line: 12, character: active_line.length }
+  });
+
+  assert.deepEqual(signatureHelp, {
+    label: 'Inner(Key, Fallback) As Variant',
+    activeParameter: 0,
+    documentation: undefined,
+    parameters: [
+      { label: 'Key', documentation: undefined },
+      { label: 'Fallback', documentation: undefined }
+    ]
+  });
+});
+
+test('signature help fails closed for unresolved continued nested calls', () => {
+  const active_line = '            ';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        'Public Sub Outer(ByVal First As Variant, ByVal Second As Variant)',
+        'End Sub',
+        '',
+        'Public Sub Run()',
+        '    Outer( _',
+        '        MissingInner( _',
+        active_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  const signatureHelp = getSignatureHelp(project, {
+    uri: 'file:///project/Worker.bas',
+    position: { line: 9, character: active_line.length }
+  });
+
+  assert.equal(signatureHelp, undefined);
+});
+
+test('signature help fails closed for code continuation markers followed by comments', () => {
+  const active_line = '        ';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        'Public Function ReadValue(ByVal Key As String, ByVal Fallback As String) As String',
+        'End Function',
+        '',
+        'Public Sub Run()',
+        '    ReadValue( _',
+        '        "id", _ \' invalid continuation',
+        active_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  const signatureHelp = getSignatureHelp(project, {
+    uri: 'file:///project/Worker.bas',
+    position: { line: 9, character: active_line.length }
+  });
+
+  assert.equal(signatureHelp, undefined);
+});
+
+test('signature help fails closed when a continued argument list is missing a code continuation marker', () => {
+  const active_line = '        ';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        'Public Function ReadValue(ByVal Key As String, ByVal Fallback As String) As String',
+        'End Function',
+        '',
+        'Public Sub Run()',
+        '    ReadValue( _',
+        '        "id",',
+        active_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  const signatureHelp = getSignatureHelp(project, {
+    uri: 'file:///project/Worker.bas',
+    position: { line: 9, character: active_line.length }
+  });
+
+  assert.equal(signatureHelp, undefined);
+});
+
+test('signature help fails closed for comment continuation markers in continued argument lists', () => {
+  const active_line = '        ';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        'Public Function ReadValue(ByVal Key As String, ByVal Fallback As String) As String',
+        'End Function',
+        '',
+        'Public Sub Run()',
+        '    ReadValue( _',
+        '        "id" \' comment _',
+        active_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  const signatureHelp = getSignatureHelp(project, {
+    uri: 'file:///project/Worker.bas',
+    position: { line: 9, character: active_line.length }
+  });
+
+  assert.equal(signatureHelp, undefined);
+});
+
 test('signature help displays source CallableSignature parameter metadata when available', () => {
   const project = buildVbaProject([
     {
@@ -3479,6 +3734,83 @@ test('signature help displays HostDefinition CallableSignature for typed host me
   const signatureHelp = getSignatureHelp(project, {
     uri: 'file:///project/Worker.bas',
     position: { line: 6, character: 23 }
+  });
+
+  assert.deepEqual(signatureHelp, {
+    label: 'Find(What, Optional After) As Range',
+    activeParameter: 1,
+    documentation: 'Finds specific information in a range.',
+    parameters: [
+      {
+        label: 'What',
+        documentation: 'The data to search for.'
+      },
+      {
+        label: 'Optional After',
+        documentation: 'The cell after which the search begins.'
+      }
+    ]
+  });
+});
+
+test('signature help remains active for host continued argument lists', () => {
+  const active_line = '        ';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    Dim rng As Range',
+        '    rng.Find "outside signature help"',
+        '    rng.Find( _',
+        '        "needle", _',
+        active_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ], {
+    hostDefinitions: [
+      {
+        name: 'Range',
+        kind: 'class',
+        hostApplication: 'excel',
+        members: [
+          {
+            name: 'Find',
+            kind: 'function',
+            hostApplication: 'excel',
+            typeName: 'Range',
+            signature: {
+              label: 'Find(What, Optional After) As Range',
+              returnTypeName: 'Range',
+              documentation: 'Finds specific information in a range.',
+              parameters: [
+                {
+                  name: 'What',
+                  typeName: 'Variant',
+                  documentation: 'The data to search for.'
+                },
+                {
+                  name: 'After',
+                  label: 'Optional After',
+                  optional: true,
+                  typeName: 'Variant',
+                  documentation: 'The cell after which the search begins.'
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  });
+
+  const signatureHelp = getSignatureHelp(project, {
+    uri: 'file:///project/Worker.bas',
+    position: { line: 8, character: active_line.length }
   });
 
   assert.deepEqual(signatureHelp, {
@@ -3634,6 +3966,39 @@ test('signature help resolves host methods reached through ContinuedMemberChain'
   assert.equal(signatureHelp?.documentation, 'Finds specific information in a range.');
 });
 
+test('signature help remains active for ContinuedMemberChain continued argument lists', () => {
+  const active_line = '        ';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    Application.ActiveWorkbook _',
+        '        .Worksheets(1) _',
+        '        .Range("A1").Find( _',
+        '            "needle", _',
+        active_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  const signatureHelp = getSignatureHelp(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 8, character: active_line.length }
+  });
+
+  assert.equal(
+    signatureHelp?.label,
+    'Find(What, Optional After, Optional LookIn, Optional LookAt, Optional SearchOrder, Optional SearchDirection, Optional MatchCase, Optional MatchByte, Optional SearchFormat) As Range'
+  );
+  assert.equal(signatureHelp?.activeParameter, 1);
+  assert.equal(signatureHelp?.documentation, 'Finds specific information in a range.');
+});
+
 test('signature help resolves host methods reached through WithReceiver leading-dot chains', () => {
   const chain_line = '        .Find("needle", ';
   const project = buildVbaProject([
@@ -3655,6 +4020,74 @@ test('signature help resolves host methods reached through WithReceiver leading-
   const signatureHelp = getSignatureHelp(project, {
     uri: 'file:///project/Caller.bas',
     position: { line: 5, character: chain_line.length }
+  });
+
+  assert.equal(
+    signatureHelp?.label,
+    'Find(What, Optional After, Optional LookIn, Optional LookAt, Optional SearchOrder, Optional SearchDirection, Optional MatchCase, Optional MatchByte, Optional SearchFormat) As Range'
+  );
+  assert.equal(signatureHelp?.activeParameter, 1);
+  assert.equal(signatureHelp?.documentation, 'Finds specific information in a range.');
+});
+
+test('signature help remains active for WithReceiver continued argument lists', () => {
+  const active_line = '        ';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    With Application.ActiveWorkbook.Worksheets(1).Range("A1")',
+        '        .Find( _',
+        '            "needle", _',
+        active_line,
+        '    End With',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  const signatureHelp = getSignatureHelp(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 7, character: active_line.length }
+  });
+
+  assert.equal(
+    signatureHelp?.label,
+    'Find(What, Optional After, Optional LookIn, Optional LookAt, Optional SearchOrder, Optional SearchDirection, Optional MatchCase, Optional MatchByte, Optional SearchFormat) As Range'
+  );
+  assert.equal(signatureHelp?.activeParameter, 1);
+  assert.equal(signatureHelp?.documentation, 'Finds specific information in a range.');
+});
+
+test('signature help remains active for continued WithReceiver continued argument lists', () => {
+  const active_line = '        ';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    With Application.ActiveWorkbook _',
+        '        .Worksheets(1) _',
+        '        .Range("A1")',
+        '        .Find( _',
+        '            "needle", _',
+        active_line,
+        '    End With',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  const signatureHelp = getSignatureHelp(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 9, character: active_line.length }
   });
 
   assert.equal(

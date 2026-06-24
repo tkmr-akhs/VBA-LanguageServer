@@ -1620,44 +1620,7 @@ function parseContinuedMemberChainEndingBefore(
     return undefined;
   }
 
-  const expression_end = findPreviousNonWhitespace(logical_source.text, logical_source.text.length - 1);
-  if (expression_end === undefined) {
-    return undefined;
-  }
-
-  const end_index = expression_end + 1;
-  const candidates: Array<{ segments: MemberChainSegment[]; endIndex: number; startIndex: number }> = [];
-  for (const range of getIdentifierRangesInCode(logical_source.text, lineIndex)) {
-    if (range.start.character >= end_index) {
-      continue;
-    }
-
-    const candidate = parseMemberChainFrom(
-      logical_source.text,
-      lineIndex,
-      range.start.character,
-      end_index,
-      (start, end) => getLogicalSourceRange(logical_source, start, end)
-    );
-    if (candidate !== undefined && candidate.endIndex === end_index) {
-      candidates.push({
-        ...candidate,
-        startIndex: range.start.character
-      });
-    }
-  }
-
-  const selected = candidates.sort((left, right) =>
-    right.segments.length - left.segments.length
-      || left.startIndex - right.startIndex
-  )[0];
-  return selected === undefined
-    ? undefined
-    : {
-        segments: selected.segments,
-        targetSegmentIndex: selected.segments.length - 1,
-        usesWithReceiver: isLeadingDotChain(logical_source.text, selected.startIndex)
-      };
+  return parseMemberChainEndingBeforeSource(logical_source, logical_source.text.length);
 }
 
 function getContinuedSourceTextEndingBefore(
@@ -1715,6 +1678,10 @@ function getLogicalSourceRange(
 
 function getCodeContinuationMarkerStart(line: string): number | undefined {
   const code_end = getCodeEndCharacter(line);
+  if (code_end < line.length) {
+    return undefined;
+  }
+
   const marker_index = findPreviousNonWhitespace(line, code_end - 1);
   if (
     marker_index === undefined
@@ -3066,7 +3033,7 @@ function getCallExpressionAt(
   const effective_character = Math.min(position.character, line.length);
   const open_paren = findActiveCallOpenParen(line, effective_character);
   if (open_paren === undefined) {
-    return undefined;
+    return getContinuedCallExpressionAt(lines, position, effective_character);
   }
 
   const chain = parseContinuedMemberChainEndingBefore(lines, position.line, open_paren)
@@ -3079,9 +3046,82 @@ function getCallExpressionAt(
   return {
     name: target_segment.name,
     nameStart: target_segment.range.start.character,
-    activeParameter: countCommas(line.slice(open_paren + 1, effective_character)),
+    activeParameter: countTopLevelCommas(line.slice(open_paren + 1, effective_character)),
     chain
   };
+}
+
+function getContinuedCallExpressionAt(
+  lines: string[],
+  position: SourcePosition,
+  effectiveCharacter: number
+): CallExpression | undefined {
+  const logical_source = getContinuedSourceTextEndingBefore(lines, position.line, effectiveCharacter);
+  if (logical_source === undefined) {
+    return undefined;
+  }
+
+  const open_paren = findActiveCallOpenParen(logical_source.text, logical_source.text.length);
+  if (open_paren === undefined) {
+    return undefined;
+  }
+
+  const chain = parseMemberChainEndingBeforeSource(logical_source, open_paren);
+  const target_segment = chain?.segments.at(-1);
+  if (target_segment === undefined) {
+    return undefined;
+  }
+
+  return {
+    name: target_segment.name,
+    nameStart: target_segment.range.start.character,
+    activeParameter: countTopLevelCommas(logical_source.text.slice(open_paren + 1)),
+    chain
+  };
+}
+
+function parseMemberChainEndingBeforeSource(
+  source: LogicalSourceText,
+  endCharacter: number
+): MemberChainExpression | undefined {
+  const expression_end = findPreviousNonWhitespace(source.text, endCharacter - 1);
+  if (expression_end === undefined) {
+    return undefined;
+  }
+
+  const end_index = expression_end + 1;
+  const candidates: Array<{ segments: MemberChainSegment[]; endIndex: number; startIndex: number }> = [];
+  for (const range of getIdentifierRangesInCode(source.text, source.positions[0]?.line ?? 0)) {
+    if (range.start.character >= end_index) {
+      continue;
+    }
+
+    const candidate = parseMemberChainFrom(
+      source.text,
+      source.positions[range.start.character]?.line ?? 0,
+      range.start.character,
+      end_index,
+      (start, end) => getLogicalSourceRange(source, start, end)
+    );
+    if (candidate !== undefined && candidate.endIndex === end_index) {
+      candidates.push({
+        ...candidate,
+        startIndex: range.start.character
+      });
+    }
+  }
+
+  const selected = candidates.sort((left, right) =>
+    right.segments.length - left.segments.length
+      || left.startIndex - right.startIndex
+  )[0];
+  return selected === undefined
+    ? undefined
+    : {
+        segments: selected.segments,
+        targetSegmentIndex: selected.segments.length - 1,
+        usesWithReceiver: isLeadingDotChain(source.text, selected.startIndex)
+      };
 }
 
 function findActiveCallOpenParen(line: string, positionCharacter: number): number | undefined {
@@ -3125,8 +3165,48 @@ function findActiveCallOpenParen(line: string, positionCharacter: number): numbe
   return open_parens.at(-1);
 }
 
-function countCommas(text: string): number {
-  return [...text].filter((character) => character === ',').length;
+function countTopLevelCommas(text: string): number {
+  let count = 0;
+  let depth = 0;
+  let character_index = 0;
+  let is_in_string = false;
+
+  while (character_index < text.length) {
+    const character = text[character_index];
+    if (is_in_string) {
+      if (character === '"') {
+        if (text[character_index + 1] === '"') {
+          character_index += 2;
+        } else {
+          is_in_string = false;
+          character_index += 1;
+        }
+      } else {
+        character_index += 1;
+      }
+      continue;
+    }
+
+    if (character === "'") {
+      break;
+    }
+    if (character === '"') {
+      is_in_string = true;
+      character_index += 1;
+      continue;
+    }
+    if (character === '(') {
+      depth += 1;
+    } else if (character === ')') {
+      depth = Math.max(0, depth - 1);
+    } else if (character === ',' && depth === 0) {
+      count += 1;
+    }
+
+    character_index += 1;
+  }
+
+  return count;
 }
 
 function isVbaSourceUri(uri: string): boolean {

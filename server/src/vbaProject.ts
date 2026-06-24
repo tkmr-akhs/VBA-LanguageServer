@@ -219,6 +219,11 @@ interface CallExpression {
   chain?: MemberChainExpression;
 }
 
+interface LogicalSourceText {
+  text: string;
+  positions: SourcePosition[];
+}
+
 type TypeResolutionRef =
   | {
       source: 'vba';
@@ -1571,7 +1576,8 @@ function getMemberCompletionAt(
     return undefined;
   }
 
-  const receiver_chain = parseMemberChainEndingAt(line, position.line, dot_index);
+  const continued_receiver_chain = parseContinuedMemberChainEndingBefore(lines, position.line, dot_index);
+  const receiver_chain = continued_receiver_chain ?? parseMemberChainEndingAt(line, position.line, dot_index);
   if (receiver_chain === undefined) {
     const leading_dot = findPreviousNonWhitespace(line, dot_index - 1) === undefined;
     return leading_dot
@@ -1583,12 +1589,132 @@ function getMemberCompletionAt(
       : undefined;
   }
 
-  const qualifier_start = receiver_chain.segments[0].range.start.character;
+  const qualifier_start = receiver_chain.segments[0].range.start.line === position.line
+    ? receiver_chain.segments[0].range.start.character
+    : dot_index;
   return {
     qualifier: line.slice(qualifier_start, dot_index).trim(),
     prefix,
     receiverChain: receiver_chain
   };
+}
+
+function parseContinuedMemberChainEndingBefore(
+  lines: string[],
+  lineIndex: number,
+  endCharacter: number
+): MemberChainExpression | undefined {
+  const logical_source = getContinuedSourceTextEndingBefore(lines, lineIndex, endCharacter);
+  if (logical_source === undefined) {
+    return undefined;
+  }
+
+  const expression_end = findPreviousNonWhitespace(logical_source.text, logical_source.text.length - 1);
+  if (expression_end === undefined) {
+    return undefined;
+  }
+
+  const end_index = expression_end + 1;
+  const candidates: Array<{ segments: MemberChainSegment[]; endIndex: number; startIndex: number }> = [];
+  for (const range of getIdentifierRangesInCode(logical_source.text, lineIndex)) {
+    if (range.start.character >= end_index) {
+      continue;
+    }
+
+    const candidate = parseMemberChainFrom(
+      logical_source.text,
+      lineIndex,
+      range.start.character,
+      end_index,
+      (start, end) => getLogicalSourceRange(logical_source, start, end)
+    );
+    if (candidate !== undefined && candidate.endIndex === end_index) {
+      candidates.push({
+        ...candidate,
+        startIndex: range.start.character
+      });
+    }
+  }
+
+  const selected = candidates.sort((left, right) =>
+    right.segments.length - left.segments.length
+      || left.startIndex - right.startIndex
+  )[0];
+  return selected === undefined
+    ? undefined
+    : {
+        segments: selected.segments,
+        targetSegmentIndex: selected.segments.length - 1,
+        usesWithReceiver: isLeadingDotChain(logical_source.text, selected.startIndex)
+      };
+}
+
+function getContinuedSourceTextEndingBefore(
+  lines: string[],
+  lineIndex: number,
+  endCharacter: number
+): LogicalSourceText | undefined {
+  let start_line = lineIndex;
+  while (start_line > 0 && getCodeContinuationMarkerStart(lines[start_line - 1] ?? '') !== undefined) {
+    start_line -= 1;
+  }
+
+  if (start_line === lineIndex) {
+    return undefined;
+  }
+
+  const text_parts: string[] = [];
+  const positions: SourcePosition[] = [];
+  for (let current_line_index = start_line; current_line_index <= lineIndex; current_line_index += 1) {
+    const line = lines[current_line_index] ?? '';
+    const line_end = current_line_index === lineIndex
+      ? Math.min(endCharacter, line.length)
+      : getCodeContinuationMarkerStart(line);
+    if (line_end === undefined) {
+      return undefined;
+    }
+
+    text_parts.push(line.slice(0, line_end));
+    for (let character = 0; character < line_end; character += 1) {
+      positions.push({ line: current_line_index, character });
+    }
+  }
+
+  return {
+    text: text_parts.join(''),
+    positions
+  };
+}
+
+function getLogicalSourceRange(
+  source: LogicalSourceText,
+  start: number,
+  end: number
+): SourceRange {
+  const start_position = source.positions[start];
+  const last_position = source.positions[end - 1];
+  return {
+    start: start_position,
+    end: {
+      line: last_position.line,
+      character: last_position.character + 1
+    }
+  };
+}
+
+function getCodeContinuationMarkerStart(line: string): number | undefined {
+  const code_end = getCodeEndCharacter(line);
+  const marker_index = findPreviousNonWhitespace(line, code_end - 1);
+  if (
+    marker_index === undefined
+    || line[marker_index] !== '_'
+    || marker_index === 0
+    || !/\s/.test(line[marker_index - 1])
+  ) {
+    return undefined;
+  }
+
+  return marker_index;
 }
 
 function parseMemberChainEndingAt(
@@ -1654,7 +1780,8 @@ function getMemberChainExpressionAt(
     return undefined;
   }
 
-  const chain = parseMemberChainEndingBefore(line, position.line, identifier_range.end.character);
+  const chain = parseContinuedMemberChainEndingBefore(lines, position.line, identifier_range.end.character)
+    ?? parseMemberChainEndingBefore(line, position.line, identifier_range.end.character);
   if (chain === undefined) {
     return undefined;
   }
@@ -1675,7 +1802,11 @@ function parseMemberChainFrom(
   line: string,
   lineIndex: number,
   startCharacter: number,
-  endCharacter: number
+  endCharacter: number,
+  getRange: (start: number, end: number) => SourceRange = (start, end) => ({
+    start: { line: lineIndex, character: start },
+    end: { line: lineIndex, character: end }
+  })
 ): { segments: MemberChainSegment[]; endIndex: number } | undefined {
   const segments: MemberChainSegment[] = [];
   let character_index = startCharacter;
@@ -1703,10 +1834,7 @@ function parseMemberChainFrom(
 
     segments.push({
       name: identifier.name,
-      range: {
-        start: { line: lineIndex, character: identifier.start },
-        end: { line: lineIndex, character: identifier.end }
-      },
+      range: getRange(identifier.start, identifier.end),
       hasCall: has_call
     });
 
@@ -2799,7 +2927,8 @@ function getCallExpressionAt(
     return undefined;
   }
 
-  const chain = parseMemberChainEndingBefore(line, position.line, open_paren);
+  const chain = parseContinuedMemberChainEndingBefore(lines, position.line, open_paren)
+    ?? parseMemberChainEndingBefore(line, position.line, open_paren);
   const target_segment = chain?.segments.at(-1);
   if (target_segment === undefined) {
     return undefined;

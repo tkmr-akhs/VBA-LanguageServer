@@ -93,8 +93,12 @@ _Avoid_: type inference, runtime type, guessed type
 The process of resolving a sequence of member accesses by carrying each resolved member's declared result type to the next member access. It applies to both source `VbaDefinition`s and host `HostDefinition`s when result type metadata is available; missing or ambiguous result types stop the chain.
 _Avoid_: host chain resolution, dotted lookup, chained lookup
 
+**ContinuedMemberChain**:
+A `MemberChainResolution` expression written across multiple physical VBA lines using code line-continuation markers. It is one logical member chain for resolution, while each segment keeps its original physical source range for editor features; a leading dot on a continued physical line belongs to this explicit chain rather than to a `WithReceiver`, and comment continuations are not part of it.
+_Avoid_: logical line, multiline chain, wrapped chain
+
 **WithReceiver**:
-The nearest active `With ... End With` expression that supplies the implicit receiver for a leading-dot member chain. Nested `With` blocks use the innermost active `WithReceiver`; missing or ambiguous receiver types do not produce guessed member results.
+The nearest active `With ... End With` expression that supplies the implicit receiver for a leading-dot member chain that is not part of a `ContinuedMemberChain`. Nested `With` blocks use the innermost active `WithReceiver`; missing or ambiguous receiver types do not produce guessed member results.
 _Avoid_: with context, current object, implicit type
 
 **QualifiedReference**:
@@ -183,6 +187,9 @@ Domain Expert: "No. That is `MemberChainResolution`: each resolved member's decl
 
 Dev: "Can `Me.CreateCustomer().DisplayName` participate in `MemberChainResolution`?"
 Domain Expert: "Yes, inside class and form modules. `Me` is the current instance root, and private members remain visible within that same module."
+
+Dev: "Is `Application.ActiveWorkbook _` followed by `.Worksheets(1)` on the next line a different kind of lookup?"
+Domain Expert: "No. It is a `ContinuedMemberChain`: one `MemberChainResolution` expression split across physical lines, with each member still tied to its original source range."
 
 Dev: "Inside `With Application.ActiveWorkbook.Worksheets(1).Range(\"A1\")`, what does `.Find` mean?"
 Domain Expert: "The `WithReceiver` is the resolved range expression, so `.Find` is resolved as a member chain on that receiver. If the `WithReceiver` type is missing or ambiguous, no guessed member result is produced."

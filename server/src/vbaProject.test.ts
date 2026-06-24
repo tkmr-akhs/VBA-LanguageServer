@@ -770,6 +770,85 @@ test('hover and definition resolve source members reached through member chains'
   });
 });
 
+test('ContinuedMemberChain resolves source member hover and definition', () => {
+  const middle_chain_line = '        .CreateCustomer() _';
+  const final_chain_line = '        .Address.City';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    CustomerFactory _',
+        middle_chain_line,
+        final_chain_line,
+        'End Sub'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/CustomerFactory.bas',
+      text: [
+        'Attribute VB_Name = "CustomerFactory"',
+        'Option Explicit',
+        '',
+        'Public Function CreateCustomer() As Customer',
+        'End Function'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/Customer.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "Customer"',
+        'Option Explicit',
+        '',
+        'Public Property Get Address() As CustomerAddress',
+        'End Property'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/CustomerAddress.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "CustomerAddress"',
+        'Option Explicit',
+        '',
+        "'* @brief City documentation.",
+        'Public Property Get City() As String',
+        'End Property'
+      ].join('\n')
+    }
+  ]);
+
+  const request = {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 6, character: final_chain_line.length - 2 }
+  };
+
+  assert.deepEqual(getHover(project, request), {
+    contents: 'City documentation.'
+  });
+  assert.deepEqual(getDefinition(project, request), {
+    uri: 'file:///project/CustomerAddress.cls',
+    range: {
+      start: { line: 5, character: 20 },
+      end: { line: 5, character: 24 }
+    }
+  });
+  assert.deepEqual(getDefinition(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 5, character: middle_chain_line.indexOf('CreateCustomer') + 2 }
+  }), {
+    uri: 'file:///project/CustomerFactory.bas',
+    range: {
+      start: { line: 3, character: 16 },
+      end: { line: 3, character: 30 }
+    }
+  });
+});
+
 test('Excel host member chains use declared return types for completion', () => {
   const chain_line = '    Application.ActiveWorkbook.Worksheets(1).Range("A1").Fi';
   const project = buildVbaProject([
@@ -795,6 +874,77 @@ test('Excel host member chains use declared return types for completion', () => 
     completions.map((item) => ({ label: item.label, detail: item.detail })),
     [{ label: 'Find', detail: 'Excel.Find' }]
   );
+});
+
+test('ContinuedMemberChain enables completion for host member chains', () => {
+  const final_chain_line = '        .Range("A1").Fi';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    Application.ActiveWorkbook _',
+        '        .Worksheets(1) _',
+        final_chain_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  const completions = getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 6, character: final_chain_line.length }
+  });
+
+  assert.deepEqual(
+    completions.map((item) => ({ label: item.label, detail: item.detail })),
+    [{ label: 'Find', detail: 'Excel.Find' }]
+  );
+});
+
+test('ContinuedMemberChain fails closed for invalid continuation chains', () => {
+  const final_chain_line = '        .Range("A1").Fi';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    Application.ActiveWorkbook _',
+        '        Bogus _',
+        final_chain_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+  const comment_continuation_project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        "    Dim example_val As Integer ' comment _",
+        final_chain_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 6, character: final_chain_line.length }
+  }), []);
+  assert.deepEqual(getCompletions(comment_continuation_project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 5, character: final_chain_line.length }
+  }), []);
 });
 
 test('WithReceiver enables leading-dot completion for host member chains', () => {
@@ -1102,6 +1252,35 @@ test('host members reached through member chains provide hover but not definitio
   const request = {
     uri: 'file:///project/Caller.bas',
     position: { line: 4, character: chain_line.length - 2 }
+  };
+
+  assert.deepEqual(getHover(project, request), {
+    contents: 'Excel.Find\n\nFinds specific information in a range.'
+  });
+  assert.equal(getDefinition(project, request), undefined);
+  assert.equal(getRenameTarget(project, request), undefined);
+});
+
+test('host members reached through ContinuedMemberChain provide hover but not definition or rename targets', () => {
+  const final_chain_line = '        .Range("A1").Find';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    Application.ActiveWorkbook _',
+        '        .Worksheets(1) _',
+        final_chain_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+  const request = {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 6, character: final_chain_line.length - 2 }
   };
 
   assert.deepEqual(getHover(project, request), {
@@ -3035,6 +3214,37 @@ test('signature help resolves host methods reached through member chains', () =>
       { label: 'Optional SearchFormat', documentation: 'Variant. The search format.' }
     ]
   });
+});
+
+test('signature help resolves host methods reached through ContinuedMemberChain', () => {
+  const final_chain_line = '        .Range("A1").Find("needle", ';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    Application.ActiveWorkbook _',
+        '        .Worksheets(1) _',
+        final_chain_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  const signatureHelp = getSignatureHelp(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 6, character: final_chain_line.length }
+  });
+
+  assert.equal(
+    signatureHelp?.label,
+    'Find(What, Optional After, Optional LookIn, Optional LookAt, Optional SearchOrder, Optional SearchDirection, Optional MatchCase, Optional MatchByte, Optional SearchFormat) As Range'
+  );
+  assert.equal(signatureHelp?.activeParameter, 1);
+  assert.equal(signatureHelp?.documentation, 'Finds specific information in a range.');
 });
 
 test('signature help resolves host methods reached through WithReceiver leading-dot chains', () => {

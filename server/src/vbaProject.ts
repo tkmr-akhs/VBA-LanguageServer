@@ -154,6 +154,7 @@ export type SyntaxDiagnosticCode =
   | 'syntax.malformedDeclarationBlock'
   | 'syntax.malformedBlockStructure'
   | 'syntax.malformedControlFlow'
+  | 'syntax.malformedExpression'
   | 'syntax.malformedAttribute'
   | 'syntax.malformedDateLiteral'
   | 'syntax.malformedOption'
@@ -385,6 +386,9 @@ export function updateVbaProjectFile(
 export function getCompletions(project: VbaProject, request: CompletionRequest): CompletionEntry[] {
   const current_module = findModule(project, request.uri);
   if (current_module === undefined) {
+    return [];
+  }
+  if (isInMalformedExpressionRegion(current_module, request.position)) {
     return [];
   }
 
@@ -756,6 +760,9 @@ export function resolveName(
   if (current_module === undefined) {
     return undefined;
   }
+  if (isInMalformedExpressionRegion(current_module, request.position)) {
+    return undefined;
+  }
 
   const identifier = getIdentifierAt(current_module.lines, request.position);
   if (identifier === undefined) {
@@ -1090,10 +1097,15 @@ function parseModuleIdentity(lines: string[]): { name: string; range: SourceRang
 }
 
 function collectSyntaxDiagnostics(lines: string[], codeStartLine: number): SyntaxDiagnostic[] {
-  const diagnostics = [
+  const pre_expression_diagnostics = [
     ...collectHeaderSyntaxDiagnostics(lines, codeStartLine),
     ...collectDeclarationBlockDiagnostics(lines, codeStartLine),
-    ...collectControlFlowDiagnostics(lines, codeStartLine),
+    ...collectControlFlowDiagnostics(lines, codeStartLine)
+  ];
+  const expression_skip_lines = new Set(pre_expression_diagnostics.map((diagnostic) => diagnostic.range.start.line));
+  const diagnostics = [
+    ...pre_expression_diagnostics,
+    ...collectExpressionDiagnostics(lines, codeStartLine, expression_skip_lines),
     ...collectBlockStructureDiagnostics(lines, codeStartLine)
   ];
   const header_diagnostic_lines = new Set(diagnostics.map((diagnostic) => diagnostic.range.start.line));
@@ -3446,6 +3458,514 @@ function createMalformedControlFlowDiagnostic(
   };
 }
 
+interface ExpressionSpan {
+  start: number;
+  end: number;
+}
+
+interface ExpressionOperatorRange {
+  start: number;
+  end: number;
+}
+
+function collectExpressionDiagnostics(
+  lines: string[],
+  codeStartLine: number,
+  skipLines: Set<number>
+): SyntaxDiagnostic[] {
+  const diagnostics: SyntaxDiagnostic[] = [];
+  let skipped_declaration_block: DeclarationBlockKind | undefined;
+
+  for (let line_index = codeStartLine; line_index < lines.length; line_index += 1) {
+    if (skipLines.has(line_index)) {
+      continue;
+    }
+
+    const line = lines[line_index];
+    const code_end = getCodeEndCharacter(line);
+    const structure_text = getCodeTextForStructure(line).trim();
+    if (structure_text === '' || isCommentOnlyLine(line) || isHeaderLine(structure_text)) {
+      continue;
+    }
+    if (collectLexicalSyntaxDiagnostics(line, line_index).length > 0) {
+      continue;
+    }
+
+    const declaration_closer = getDeclarationBlockCloser(line, line_index, code_end);
+    if (skipped_declaration_block !== undefined) {
+      if (declaration_closer?.kind === skipped_declaration_block) {
+        skipped_declaration_block = undefined;
+      }
+      continue;
+    }
+
+    const declaration_header = getDeclarationBlockHeader(line, line_index, code_end);
+    if (declaration_header !== undefined) {
+      skipped_declaration_block = declaration_header.kind;
+      continue;
+    }
+    if (declaration_closer !== undefined) {
+      continue;
+    }
+
+    for (const segment of getStatementSegments(line)) {
+      const segment_end = Math.min(segment.end, code_end);
+      if (segment.start >= segment_end) {
+        continue;
+      }
+
+      const spans = getExpressionSpansForDiagnostics(line, segment.start, segment_end);
+      for (const span of spans) {
+        diagnostics.push(...collectMalformedExpressionDiagnostics(line, line_index, span.start, span.end));
+      }
+    }
+  }
+
+  return diagnostics;
+}
+
+function getExpressionSpansForDiagnostics(
+  line: string,
+  segmentStart: number,
+  segmentEnd: number
+): ExpressionSpan[] {
+  const trimmed_start = skipWhitespace(line, segmentStart, segmentEnd);
+  const trimmed_end = trimEndIndex(line, segmentEnd);
+  if (trimmed_start >= trimmed_end) {
+    return [];
+  }
+
+  const first_token = readIdentifierTokenAt(line, trimmed_start, trimmed_end);
+  if (first_token === undefined) {
+    return [];
+  }
+
+  if (first_token.lowerText === 'if' || first_token.lowerText === 'elseif') {
+    const then_start = findKeywordOutsideLiterals(line, 'then', first_token.end, trimmed_end);
+    return then_start === undefined
+      ? []
+      : [{ start: first_token.end, end: then_start }];
+  }
+
+  if (first_token.lowerText === 'while' || first_token.lowerText === 'with') {
+    return [{ start: first_token.end, end: trimmed_end }];
+  }
+
+  if (first_token.lowerText === 'do' || first_token.lowerText === 'loop') {
+    const condition_keyword = readIdentifierTokenAt(line, skipWhitespace(line, first_token.end, trimmed_end), trimmed_end);
+    return condition_keyword !== undefined
+      && (condition_keyword.lowerText === 'while' || condition_keyword.lowerText === 'until')
+      ? [{ start: condition_keyword.end, end: trimmed_end }]
+      : [];
+  }
+
+  if (first_token.lowerText === 'select') {
+    const case_keyword = readIdentifierTokenAt(line, skipWhitespace(line, first_token.end, trimmed_end), trimmed_end);
+    return case_keyword?.lowerText === 'case'
+      ? [{ start: case_keyword.end, end: trimmed_end }]
+      : [];
+  }
+
+  if (first_token.lowerText === 'case') {
+    const after_case = skipWhitespace(line, first_token.end, trimmed_end);
+    if (startsWithKeywordAt(line, after_case, 'else', trimmed_end)) {
+      return [];
+    }
+
+    return splitTopLevelSegments(line, after_case, trimmed_end);
+  }
+
+  if (shouldSkipExpressionDiagnosticsForStatement(first_token.lowerText)) {
+    return [];
+  }
+
+  const equals_index = findTopLevelAssignmentEquals(line, first_token.end, trimmed_end);
+  return equals_index === undefined
+    ? []
+    : [{ start: equals_index + 1, end: trimmed_end }];
+}
+
+function shouldSkipExpressionDiagnosticsForStatement(firstToken: string): boolean {
+  return firstToken === 'attribute'
+    || firstToken === 'option'
+    || firstToken === 'const'
+    || firstToken === 'dim'
+    || firstToken === 'static'
+    || firstToken === 'redim'
+    || firstToken === 'public'
+    || firstToken === 'private'
+    || firstToken === 'friend'
+    || firstToken === 'declare'
+    || firstToken === 'sub'
+    || firstToken === 'function'
+    || firstToken === 'property'
+    || firstToken === 'event'
+    || firstToken === 'enum'
+    || firstToken === 'type'
+    || firstToken === 'implements'
+    || firstToken === 'end';
+}
+
+function collectMalformedExpressionDiagnostics(
+  line: string,
+  lineIndex: number,
+  startCharacter: number,
+  endCharacter: number
+): SyntaxDiagnostic[] {
+  const diagnostics: SyntaxDiagnostic[] = [];
+  const trimmed_start = skipWhitespace(line, startCharacter, endCharacter);
+  const trimmed_end = trimEndIndex(line, endCharacter);
+  if (trimmed_start >= trimmed_end) {
+    diagnostics.push(createMalformedExpressionDiagnostic(
+      'Expression is missing an operand.',
+      lineIndex,
+      startCharacter,
+      endCharacter
+    ));
+    return diagnostics;
+  }
+
+  const paren_stack: number[] = [];
+  let character_index = trimmed_start;
+  let expecting_operand = true;
+  let last_operator: ExpressionOperatorRange | undefined;
+
+  while (character_index < trimmed_end) {
+    const character = line[character_index];
+    if (/\s/.test(character)) {
+      character_index += 1;
+      continue;
+    }
+
+    if (character === '"') {
+      const string_end = getStringLiteralEnd(line, character_index);
+      if (string_end === undefined || string_end > trimmed_end) {
+        break;
+      }
+      expecting_operand = false;
+      last_operator = undefined;
+      character_index = string_end;
+      continue;
+    }
+
+    if (character === '#' && !shouldSkipHashCharacter(line, character_index)) {
+      const closing_index = line.indexOf('#', character_index + 1);
+      if (closing_index === -1 || closing_index >= trimmed_end) {
+        break;
+      }
+      expecting_operand = false;
+      last_operator = undefined;
+      character_index = closing_index + 1;
+      continue;
+    }
+
+    if (character === '(') {
+      paren_stack.push(character_index);
+      expecting_operand = true;
+      last_operator = undefined;
+      character_index += 1;
+      continue;
+    }
+
+    if (character === ')') {
+      if (paren_stack.length === 0) {
+        diagnostics.push(createMalformedExpressionDiagnostic(
+          'Unexpected closing parenthesis in expression.',
+          lineIndex,
+          character_index,
+          character_index + 1
+        ));
+        return diagnostics;
+      }
+
+      paren_stack.pop();
+      expecting_operand = false;
+      last_operator = undefined;
+      character_index += 1;
+      continue;
+    }
+
+    if (character === ',') {
+      if (expecting_operand) {
+        diagnostics.push(createMalformedExpressionDiagnostic(
+          'Expression is missing an operand before this separator.',
+          lineIndex,
+          character_index,
+          character_index + 1
+        ));
+        return diagnostics;
+      }
+
+      expecting_operand = true;
+      last_operator = undefined;
+      character_index += 1;
+      continue;
+    }
+
+    if (isExpressionSymbolicOperatorStart(character)) {
+      const operator_end = readExpressionSymbolicOperatorEnd(line, character_index, trimmed_end);
+      if (expecting_operand && !isUnaryExpressionOperator(line.slice(character_index, operator_end))) {
+        diagnostics.push(createMalformedExpressionDiagnostic(
+          'Expression is missing an operand before this operator.',
+          lineIndex,
+          character_index,
+          operator_end
+        ));
+        return diagnostics;
+      }
+
+      expecting_operand = true;
+      last_operator = { start: character_index, end: operator_end };
+      character_index = operator_end;
+      continue;
+    }
+
+    const token = readIdentifierTokenAt(line, character_index, trimmed_end);
+    if (token !== undefined) {
+      if (isExpressionWordOperator(token.lowerText)) {
+        if (expecting_operand && token.lowerText !== 'not') {
+          diagnostics.push(createMalformedExpressionDiagnostic(
+            'Expression is missing an operand before this operator.',
+            lineIndex,
+            token.start,
+            token.end
+          ));
+          return diagnostics;
+        }
+
+        expecting_operand = true;
+        last_operator = { start: token.start, end: token.end };
+        character_index = token.end;
+        continue;
+      }
+
+      expecting_operand = false;
+      last_operator = undefined;
+      character_index = token.end;
+      continue;
+    }
+
+    const number_end = readNumericLiteralEnd(line, character_index, trimmed_end);
+    if (number_end !== undefined) {
+      expecting_operand = false;
+      last_operator = undefined;
+      character_index = number_end;
+      continue;
+    }
+
+    character_index += 1;
+  }
+
+  if (paren_stack.length > 0) {
+    const open_paren = paren_stack[paren_stack.length - 1];
+    diagnostics.push(createMalformedExpressionDiagnostic(
+      'Parenthesized expression is missing a closing parenthesis.',
+      lineIndex,
+      open_paren,
+      open_paren + 1
+    ));
+    return diagnostics;
+  }
+
+  if (expecting_operand && last_operator !== undefined) {
+    diagnostics.push(createMalformedExpressionDiagnostic(
+      'Expression is missing an operand after this operator.',
+      lineIndex,
+      last_operator.start,
+      last_operator.end
+    ));
+  }
+
+  return diagnostics;
+}
+
+function findTopLevelAssignmentEquals(
+  line: string,
+  startCharacter: number,
+  endCharacter: number
+): number | undefined {
+  let character_index = startCharacter;
+  let is_in_string = false;
+  let paren_depth = 0;
+
+  while (character_index < endCharacter) {
+    const character = line[character_index];
+    if (is_in_string) {
+      if (character === '"') {
+        if (line[character_index + 1] === '"') {
+          character_index += 2;
+          continue;
+        }
+        is_in_string = false;
+      }
+      character_index += 1;
+      continue;
+    }
+
+    if (character === '"') {
+      is_in_string = true;
+    } else if (character === '(') {
+      paren_depth += 1;
+    } else if (character === ')' && paren_depth > 0) {
+      paren_depth -= 1;
+    } else if (character === '=' && paren_depth === 0 && isAssignmentEquals(line, character_index)) {
+      return character_index;
+    }
+
+    character_index += 1;
+  }
+
+  return undefined;
+}
+
+function isAssignmentEquals(line: string, equalsIndex: number): boolean {
+  const previous_character = findPreviousNonWhitespace(line, equalsIndex - 1);
+  if (
+    previous_character !== undefined
+    && (line[previous_character] === '<' || line[previous_character] === '>' || line[previous_character] === ':')
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function findKeywordOutsideLiterals(
+  line: string,
+  keyword: string,
+  startCharacter: number,
+  endCharacter: number
+): number | undefined {
+  let character_index = startCharacter;
+  let is_in_string = false;
+  const lower_keyword = keyword.toLowerCase();
+
+  while (character_index < endCharacter) {
+    const character = line[character_index];
+    if (is_in_string) {
+      if (character === '"') {
+        if (line[character_index + 1] === '"') {
+          character_index += 2;
+          continue;
+        }
+        is_in_string = false;
+      }
+      character_index += 1;
+      continue;
+    }
+
+    if (character === '"') {
+      is_in_string = true;
+      character_index += 1;
+      continue;
+    }
+
+    if (isKeywordTokenAt(line, character_index, lower_keyword, endCharacter)) {
+      return character_index;
+    }
+
+    character_index += 1;
+  }
+
+  return undefined;
+}
+
+function isKeywordTokenAt(
+  line: string,
+  characterIndex: number,
+  lowerKeyword: string,
+  endCharacter: number
+): boolean {
+  if (line.slice(characterIndex, characterIndex + lowerKeyword.length).toLowerCase() !== lowerKeyword) {
+    return false;
+  }
+
+  const before = characterIndex === 0 ? '' : line[characterIndex - 1];
+  const after_index = characterIndex + lowerKeyword.length;
+  const after = after_index >= endCharacter ? '' : line[after_index];
+  return (before === '' || !isIdentifierPart(before))
+    && (after === '' || !isIdentifierPart(after));
+}
+
+function isExpressionSymbolicOperatorStart(character: string): boolean {
+  return '+-*/\\^&=<>'.includes(character);
+}
+
+function readExpressionSymbolicOperatorEnd(line: string, startCharacter: number, endCharacter: number): number {
+  const character = line[startCharacter];
+  const next_character = startCharacter + 1 < endCharacter ? line[startCharacter + 1] : '';
+  if ((character === '<' || character === '>') && next_character === '=') {
+    return startCharacter + 2;
+  }
+  if (character === '<' && next_character === '>') {
+    return startCharacter + 2;
+  }
+
+  return startCharacter + 1;
+}
+
+function isUnaryExpressionOperator(operatorText: string): boolean {
+  return operatorText === '+' || operatorText === '-';
+}
+
+function isExpressionWordOperator(value: string): boolean {
+  return value === 'and'
+    || value === 'or'
+    || value === 'xor'
+    || value === 'eqv'
+    || value === 'imp'
+    || value === 'mod'
+    || value === 'like'
+    || value === 'is'
+    || value === 'not';
+}
+
+function readNumericLiteralEnd(
+  line: string,
+  startCharacter: number,
+  endCharacter: number
+): number | undefined {
+  if (!/[0-9]/.test(line[startCharacter] ?? '')) {
+    return undefined;
+  }
+
+  let character_index = startCharacter + 1;
+  while (character_index < endCharacter && /[0-9]/.test(line[character_index])) {
+    character_index += 1;
+  }
+
+  if (line[character_index] === '.') {
+    character_index += 1;
+    while (character_index < endCharacter && /[0-9]/.test(line[character_index])) {
+      character_index += 1;
+    }
+  }
+
+  if (character_index < endCharacter && /[%&!#@$]/.test(line[character_index])) {
+    character_index += 1;
+  }
+
+  return character_index;
+}
+
+function createMalformedExpressionDiagnostic(
+  message: string,
+  lineIndex: number,
+  startCharacter: number,
+  endCharacter: number
+): SyntaxDiagnostic {
+  return {
+    code: 'syntax.malformedExpression',
+    message,
+    range: {
+      start: { line: lineIndex, character: startCharacter },
+      end: { line: lineIndex, character: endCharacter }
+    },
+    severity: 'error',
+    source: 'vba-language-server'
+  };
+}
+
 interface StatementSegment {
   start: number;
   end: number;
@@ -5578,6 +6098,14 @@ function isOpeningBlockLine(text: string): boolean {
 
 function findModule(project: VbaProject, uri: string): VbaModule | undefined {
   return project.modules.find((module) => sameUri(module.uri, uri));
+}
+
+function isInMalformedExpressionRegion(module: VbaModule, position: SourcePosition): boolean {
+  return module.syntaxDiagnostics.some((diagnostic) =>
+    diagnostic.code === 'syntax.malformedExpression'
+    && diagnostic.range.start.line === position.line
+    && position.character >= diagnostic.range.start.character
+  );
 }
 
 function getIdentifierPrefix(lines: string[], position: SourcePosition): string {

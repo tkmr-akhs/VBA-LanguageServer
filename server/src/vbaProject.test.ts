@@ -2080,6 +2080,138 @@ test('malformed With receiver syntax fails closed without guessed member complet
   }), []);
 });
 
+test('syntax diagnostics report malformed expressions operators and parentheses', () => {
+  const trailing_operator_line = '    value = 1 +';
+  const missing_paren_line = '    other = (1 + 2';
+  const unexpected_paren_line = '    third = )1';
+  const missing_condition_operand_line = '    If value > Then';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Expressions.bas',
+      text: [
+        'Attribute VB_Name = "Expressions"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        trailing_operator_line,
+        missing_paren_line,
+        unexpected_paren_line,
+        missing_condition_operand_line,
+        '    End If',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Expressions.bas'), [
+    {
+      code: 'syntax.malformedExpression',
+      message: 'Expression is missing an operand after this operator.',
+      range: {
+        start: { line: 4, character: trailing_operator_line.indexOf('+') },
+        end: { line: 4, character: trailing_operator_line.indexOf('+') + 1 }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedExpression',
+      message: 'Parenthesized expression is missing a closing parenthesis.',
+      range: {
+        start: { line: 5, character: missing_paren_line.indexOf('(') },
+        end: { line: 5, character: missing_paren_line.indexOf('(') + 1 }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedExpression',
+      message: 'Unexpected closing parenthesis in expression.',
+      range: {
+        start: { line: 6, character: unexpected_paren_line.indexOf(')') },
+        end: { line: 6, character: unexpected_paren_line.indexOf(')') + 1 }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedExpression',
+      message: 'Expression is missing an operand after this operator.',
+      range: {
+        start: { line: 7, character: missing_condition_operand_line.indexOf('>') },
+        end: { line: 7, character: missing_condition_operand_line.indexOf('>') + 1 }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+});
+
+test('syntax diagnostics ignore valid expressions in declarations conditions assignments calls and chains', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Expressions.bas',
+      text: [
+        'Attribute VB_Name = "Expressions"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    Dim value As Long',
+        '    value = (1 + 2) * 3',
+        '    If value > 0 And Not IsEmpty(value) Then',
+        '        value = Len(CStr(value)) + 1',
+        '    End If',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Expressions.bas'), []);
+});
+
+test('malformed expression regions fail closed without guessed member completion', () => {
+  const malformed_line = '    value = (Application';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Expressions.bas',
+      text: [
+        'Attribute VB_Name = "Expressions"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        malformed_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Expressions.bas'), [
+    {
+      code: 'syntax.malformedExpression',
+      message: 'Parenthesized expression is missing a closing parenthesis.',
+      range: {
+        start: { line: 4, character: malformed_line.indexOf('(') },
+        end: { line: 4, character: malformed_line.indexOf('(') + 1 }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+  assert.deepEqual(getCompletions(project, {
+    uri: 'file:///project/Expressions.bas',
+    position: { line: 4, character: malformed_line.length }
+  }), []);
+  const application_position = { line: 4, character: malformed_line.indexOf('Application') + 1 };
+  assert.equal(getHover(project, {
+    uri: 'file:///project/Expressions.bas',
+    position: application_position
+  }), undefined);
+  assert.equal(resolveName(project, {
+    uri: 'file:///project/Expressions.bas',
+    position: application_position
+  }), undefined);
+});
+
 test('syntax diagnostics cover cls and frm code while ignoring frm designer text', () => {
   const class_invalid_line = '        "needle", _ \' class';
   const form_invalid_line = '        "needle", _ \' form';

@@ -378,7 +378,7 @@ test('lexical syntax diagnostics preserve valid regions and invalid fail-closed 
     }
   ]);
 
-  assert.equal(getSyntaxDiagnostics(project, 'file:///project/Worker.bas').length, 1);
+  assert.equal(getSyntaxDiagnostics(project, 'file:///project/Worker.bas').length, 2);
   assert.equal(
     getSignatureHelp(project, {
       uri: 'file:///project/Worker.bas',
@@ -2210,6 +2210,236 @@ test('malformed expression regions fail closed without guessed member completion
     uri: 'file:///project/Expressions.bas',
     position: application_position
   }), undefined);
+});
+
+test('syntax diagnostics report malformed call statements and argument lists', () => {
+  const missing_paren_line = '    MissingCall(';
+  const call_without_parens_line = '    Call DoWork 1';
+  const trailing_comma_line = '    DoWork(1,)';
+  const raise_named_arg_line = '    RaiseEvent Completed(message:="ok")';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Calls.bas',
+      text: [
+        'Attribute VB_Name = "Calls"',
+        'Option Explicit',
+        '',
+        'Private Event Completed(ByVal message As String)',
+        '',
+        'Private Sub DoWork(Optional ByVal First As Variant, Optional ByVal Second As Variant)',
+        'End Sub',
+        '',
+        'Public Sub Run()',
+        missing_paren_line,
+        call_without_parens_line,
+        trailing_comma_line,
+        raise_named_arg_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Calls.bas'), [
+    {
+      code: 'syntax.malformedCall',
+      message: 'Call argument list is missing a closing parenthesis.',
+      range: {
+        start: { line: 9, character: missing_paren_line.indexOf('(') },
+        end: { line: 9, character: missing_paren_line.indexOf('(') + 1 }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedCall',
+      message: 'Call statement arguments must be enclosed in parentheses.',
+      range: {
+        start: { line: 10, character: call_without_parens_line.indexOf('1') },
+        end: { line: 10, character: call_without_parens_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedCall',
+      message: 'Call argument list has a missing argument after this comma.',
+      range: {
+        start: { line: 11, character: trailing_comma_line.indexOf(',') },
+        end: { line: 11, character: trailing_comma_line.indexOf(',') + 1 }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedCall',
+      message: 'RaiseEvent arguments cannot use named-argument syntax.',
+      range: {
+        start: { line: 12, character: raise_named_arg_line.indexOf(':=') },
+        end: { line: 12, character: raise_named_arg_line.indexOf(':=') + 2 }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+  assert.equal(getSignatureHelp(project, {
+    uri: 'file:///project/Calls.bas',
+    position: { line: 10, character: call_without_parens_line.length }
+  }), undefined);
+});
+
+test('syntax diagnostics report malformed continued call argument lists', () => {
+  const continued_trailing_comma_line = '        1,)';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Calls.bas',
+      text: [
+        'Attribute VB_Name = "Calls"',
+        'Option Explicit',
+        '',
+        'Private Sub DoWork(Optional ByVal First As Variant, Optional ByVal Second As Variant)',
+        'End Sub',
+        '',
+        'Public Sub Run()',
+        '    DoWork( _',
+        continued_trailing_comma_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Calls.bas'), [
+    {
+      code: 'syntax.malformedCall',
+      message: 'Call argument list has a missing argument after this comma.',
+      range: {
+        start: { line: 8, character: continued_trailing_comma_line.indexOf(',') },
+        end: { line: 8, character: continued_trailing_comma_line.indexOf(',') + 1 }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+});
+
+test('syntax diagnostics ignore valid call statements arguments and signature help fixtures', () => {
+  const host_call_line = '    rng.Find(What:="needle", After:=Nothing)';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Calls.bas',
+      text: [
+        'Attribute VB_Name = "Calls"',
+        'Option Explicit',
+        '',
+        "'* @brief Reads a value.",
+        'Public Function ReadValue(ByVal Key As String, Optional ByVal Fallback As String = "n/a") As String',
+        'End Function',
+        '',
+        'Private Sub DoWork(Optional ByVal First As Variant, Optional ByVal Second As Variant, Optional ByVal Third As Variant)',
+        'End Sub',
+        '',
+        'Private Event Completed(ByVal message As String)',
+        '',
+        'Public Sub Run()',
+        '    Dim rng As Range',
+        '    DoWork 1, , 3',
+        '    Call DoWork(1, , Third:=3)',
+        '    DoWork First:=1, Third:=3',
+        '    RaiseEvent Completed("ok")',
+        '    ReadValue(Key:="id", Fallback:="n/a")',
+        host_call_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Calls.bas'), []);
+  assert.equal(getSignatureHelp(project, {
+    uri: 'file:///project/Calls.bas',
+    position: { line: 19, character: host_call_line.indexOf('After') + 'After'.length }
+  })?.label, 'Find(What, Optional After, Optional LookIn, Optional LookAt, Optional SearchOrder, Optional SearchDirection, Optional MatchCase, Optional MatchByte, Optional SearchFormat) As Range');
+});
+
+test('call syntax diagnostics cover bas cls and frm code while ignoring frm designer text', () => {
+  const bas_invalid_line = '    Call DoWork 1';
+  const class_invalid_line = '    DoWork(1,)';
+  const form_invalid_line = '    MissingCall(';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Calls.bas',
+      text: [
+        'Attribute VB_Name = "Calls"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        bas_invalid_line,
+        'End Sub'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/Worker.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        class_invalid_line,
+        'End Sub'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/Dialog.frm',
+      text: [
+        'VERSION 5.00',
+        'Begin VB.Form Dialog',
+        '  Caption = "MissingCall("',
+        'End',
+        'Attribute VB_Name = "Dialog"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        form_invalid_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Calls.bas'), [
+    {
+      code: 'syntax.malformedCall',
+      message: 'Call statement arguments must be enclosed in parentheses.',
+      range: {
+        start: { line: 4, character: bas_invalid_line.indexOf('1') },
+        end: { line: 4, character: bas_invalid_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Worker.cls'), [
+    {
+      code: 'syntax.malformedCall',
+      message: 'Call argument list has a missing argument after this comma.',
+      range: {
+        start: { line: 5, character: class_invalid_line.indexOf(',') },
+        end: { line: 5, character: class_invalid_line.indexOf(',') + 1 }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Dialog.frm'), [
+    {
+      code: 'syntax.malformedCall',
+      message: 'Call argument list is missing a closing parenthesis.',
+      range: {
+        start: { line: 8, character: form_invalid_line.indexOf('(') },
+        end: { line: 8, character: form_invalid_line.indexOf('(') + 1 }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
 });
 
 test('syntax diagnostics cover cls and frm code while ignoring frm designer text', () => {

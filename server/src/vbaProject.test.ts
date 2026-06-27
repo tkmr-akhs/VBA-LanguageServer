@@ -1360,6 +1360,293 @@ test('malformed declarations fail closed without guessed type metadata', () => {
   });
 });
 
+test('syntax diagnostics report malformed enum and type declaration blocks', () => {
+  const missing_enum_name_line = 'Public Enum';
+  const bad_enum_initializer_line = '    Broken = 1 +';
+  const invalid_enum_statement_line = '    Dim NotAllowed As Long';
+  const invalid_type_visibility_line = 'Friend Type BadRecord';
+  const missing_field_type_line = '    Name As';
+  const bad_field_bounds_line = '    Scores(1 To ) As Long';
+  const invalid_type_statement_line = '    Sub Bad()';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Records.bas',
+      text: [
+        'Attribute VB_Name = "Records"',
+        'Option Explicit',
+        '',
+        missing_enum_name_line,
+        bad_enum_initializer_line,
+        invalid_enum_statement_line,
+        'End Enum',
+        invalid_type_visibility_line,
+        missing_field_type_line,
+        bad_field_bounds_line,
+        invalid_type_statement_line,
+        'End Type'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Records.bas'), [
+    {
+      code: 'syntax.malformedDeclarationBlock',
+      message: 'Enum declaration is missing a name.',
+      range: {
+        start: { line: 3, character: missing_enum_name_line.length },
+        end: { line: 3, character: missing_enum_name_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedDeclarationBlock',
+      message: 'Enum member initializer is malformed.',
+      range: {
+        start: { line: 4, character: bad_enum_initializer_line.indexOf('1 +') },
+        end: { line: 4, character: bad_enum_initializer_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedDeclarationBlock',
+      message: 'Statement is not valid inside an Enum block.',
+      range: {
+        start: { line: 5, character: invalid_enum_statement_line.search(/\S/) },
+        end: { line: 5, character: invalid_enum_statement_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedDeclarationBlock',
+      message: 'Type declaration has an invalid visibility modifier.',
+      range: {
+        start: { line: 7, character: 0 },
+        end: { line: 7, character: 'Friend'.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedDeclarationBlock',
+      message: 'Declaration type annotation is missing a type.',
+      range: {
+        start: { line: 8, character: missing_field_type_line.indexOf('As') },
+        end: { line: 8, character: missing_field_type_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedDeclarationBlock',
+      message: 'Array bounds are malformed.',
+      range: {
+        start: { line: 9, character: bad_field_bounds_line.indexOf('1 To') },
+        end: { line: 9, character: bad_field_bounds_line.indexOf(')') }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedDeclarationBlock',
+      message: 'Statement is not valid inside a Type block.',
+      range: {
+        start: { line: 10, character: invalid_type_statement_line.search(/\S/) },
+        end: { line: 10, character: invalid_type_statement_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+});
+
+test('syntax diagnostics report missing unexpected and mismatched enum type closers', () => {
+  const unexpected_closer_line = 'End Enum';
+  const enum_header_line = 'Public Enum RunMode';
+  const mismatched_closer_line = 'End Type';
+  const missing_type_header_line = 'Public Type MissingRecord';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Records.bas',
+      text: [
+        'Attribute VB_Name = "Records"',
+        'Option Explicit',
+        '',
+        unexpected_closer_line,
+        enum_header_line,
+        '    Manual',
+        mismatched_closer_line,
+        missing_type_header_line,
+        '    Value As String'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Records.bas'), [
+    {
+      code: 'syntax.malformedDeclarationBlock',
+      message: 'Unexpected End Enum without a matching Enum block.',
+      range: {
+        start: { line: 3, character: 0 },
+        end: { line: 3, character: unexpected_closer_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedDeclarationBlock',
+      message: 'Mismatched declaration block closer; expected End Enum.',
+      range: {
+        start: { line: 6, character: 0 },
+        end: { line: 6, character: mismatched_closer_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedDeclarationBlock',
+      message: 'Type block is missing End Type.',
+      range: {
+        start: { line: 7, character: missing_type_header_line.indexOf('Type') },
+        end: { line: 7, character: missing_type_header_line.indexOf('Type') + 'Type'.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+});
+
+test('declaration block diagnostics cover cls and frm code while ignoring frm designer text', () => {
+  const class_bad_field_line = '    Value As';
+  const form_bad_enum_line = '    Missing = 1 +';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Customer.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "Customer"',
+        'Option Explicit',
+        'Private Type LocalRecord',
+        class_bad_field_line,
+        'End Type'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/Dialog.frm',
+      text: [
+        'VERSION 5.00',
+        'Begin VB.Form Dialog',
+        '  Caption = "Public Enum"',
+        'End',
+        'Attribute VB_Name = "Dialog"',
+        'Option Explicit',
+        'Public Enum FormMode',
+        form_bad_enum_line,
+        'End Enum'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Customer.cls'), [
+    {
+      code: 'syntax.malformedDeclarationBlock',
+      message: 'Declaration type annotation is missing a type.',
+      range: {
+        start: { line: 4, character: class_bad_field_line.indexOf('As') },
+        end: { line: 4, character: class_bad_field_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Dialog.frm'), [
+    {
+      code: 'syntax.malformedDeclarationBlock',
+      message: 'Enum member initializer is malformed.',
+      range: {
+        start: { line: 7, character: form_bad_enum_line.indexOf('1 +') },
+        end: { line: 7, character: form_bad_enum_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+});
+
+test('syntax diagnostics ignore valid enum and type blocks while preserving definitions', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    Manual',
+        '    CustomerRecord',
+        'End Sub'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/Records.bas',
+      text: [
+        'Attribute VB_Name = "Records"',
+        'Option Explicit',
+        '',
+        'Public Enum RunMode',
+        '    Automatic = 0',
+        '    Manual',
+        'End Enum',
+        '',
+        'Public Type CustomerRecord',
+        '    Id As Long',
+        '    Name As String * 20',
+        'End Type'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Records.bas'), []);
+  assert.deepEqual(getDefinition(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 4, character: 6 }
+  }), {
+    uri: 'file:///project/Records.bas',
+    range: {
+      start: { line: 5, character: 4 },
+      end: { line: 5, character: 10 }
+    }
+  });
+  assert.deepEqual(getDefinition(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 5, character: 8 }
+  }), {
+    uri: 'file:///project/Records.bas',
+    range: {
+      start: { line: 8, character: 12 },
+      end: { line: 8, character: 26 }
+    }
+  });
+  assert.deepEqual(getTypeFields(project, 'CustomerRecord'), [
+    {
+      name: 'Id',
+      range: {
+        start: { line: 9, character: 4 },
+        end: { line: 9, character: 6 }
+      }
+    },
+    {
+      name: 'Name',
+      range: {
+        start: { line: 10, character: 4 },
+        end: { line: 10, character: 8 }
+      }
+    }
+  ]);
+});
+
 test('syntax diagnostics cover cls and frm code while ignoring frm designer text', () => {
   const class_invalid_line = '        "needle", _ \' class';
   const form_invalid_line = '        "needle", _ \' form';

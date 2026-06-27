@@ -151,6 +151,7 @@ export type SyntaxDiagnosticCode =
   | 'syntax.invalidStatementSeparator'
   | 'syntax.malformedCallableDeclaration'
   | 'syntax.malformedDeclaration'
+  | 'syntax.malformedDeclarationBlock'
   | 'syntax.malformedAttribute'
   | 'syntax.malformedDateLiteral'
   | 'syntax.malformedOption'
@@ -1087,7 +1088,10 @@ function parseModuleIdentity(lines: string[]): { name: string; range: SourceRang
 }
 
 function collectSyntaxDiagnostics(lines: string[], codeStartLine: number): SyntaxDiagnostic[] {
-  const diagnostics = collectHeaderSyntaxDiagnostics(lines, codeStartLine);
+  const diagnostics = [
+    ...collectHeaderSyntaxDiagnostics(lines, codeStartLine),
+    ...collectDeclarationBlockDiagnostics(lines, codeStartLine)
+  ];
   const header_diagnostic_lines = new Set(diagnostics.map((diagnostic) => diagnostic.range.start.line));
   for (let line_index = codeStartLine; line_index < lines.length; line_index += 1) {
     if (header_diagnostic_lines.has(line_index)) {
@@ -2252,7 +2256,11 @@ function getTypeAnnotationDiagnostic(
     );
   }
 
-  const after_type = skipWhitespace(line, type_end, endCharacter);
+  let after_type = skipWhitespace(line, type_end, endCharacter);
+  const fixed_length_suffix_end = readFixedLengthStringSuffixEnd(line, type_start, type_end, after_type, endCharacter);
+  if (fixed_length_suffix_end !== undefined) {
+    after_type = skipWhitespace(line, fixed_length_suffix_end, endCharacter);
+  }
   if (after_type < endCharacter) {
     return createMalformedDeclarationDiagnostic(
       'Declaration type annotation is malformed.',
@@ -2271,7 +2279,13 @@ function readTypeAnnotationEnd(line: string, asStart: number, endCharacter: numb
     type_start = skipWhitespace(line, type_start + 'New'.length, endCharacter);
   }
 
-  return readTypeNameEnd(line, type_start, endCharacter) ?? type_start;
+  const type_end = readTypeNameEnd(line, type_start, endCharacter);
+  if (type_end === undefined) {
+    return type_start;
+  }
+
+  const after_type = skipWhitespace(line, type_end, endCharacter);
+  return readFixedLengthStringSuffixEnd(line, type_start, type_end, after_type, endCharacter) ?? type_end;
 }
 
 function readTypeNameEnd(line: string, startCharacter: number, endCharacter: number): number | undefined {
@@ -2289,6 +2303,22 @@ function readTypeNameEnd(line: string, startCharacter: number, endCharacter: num
   }
 
   return type_end;
+}
+
+function readFixedLengthStringSuffixEnd(
+  line: string,
+  typeStart: number,
+  typeEnd: number,
+  suffixStart: number,
+  endCharacter: number
+): number | undefined {
+  if (line.slice(typeStart, typeEnd).toLowerCase() !== 'string' || line[suffixStart] !== '*') {
+    return undefined;
+  }
+
+  const length_start = skipWhitespace(line, suffixStart + 1, endCharacter);
+  const length_match = /^\d+/.exec(line.slice(length_start, endCharacter));
+  return length_match === null ? undefined : length_start + length_match[0].length;
 }
 
 function isValidArrayBounds(text: string): boolean {
@@ -2428,6 +2458,315 @@ function createMalformedDeclarationDiagnostic(
 ): SyntaxDiagnostic {
   return {
     code: 'syntax.malformedDeclaration',
+    message,
+    range: {
+      start: { line: lineIndex, character: startCharacter },
+      end: { line: lineIndex, character: endCharacter }
+    },
+    severity: 'error',
+    source: 'vba-language-server'
+  };
+}
+
+type DeclarationBlockKind = 'enum' | 'type';
+
+interface ActiveDeclarationBlock {
+  kind: DeclarationBlockKind;
+  openerLine: number;
+  keywordStart: number;
+  keywordEnd: number;
+}
+
+interface DeclarationBlockHeader {
+  kind: DeclarationBlockKind;
+  keywordStart: number;
+  keywordEnd: number;
+  diagnostics: SyntaxDiagnostic[];
+}
+
+function collectDeclarationBlockDiagnostics(lines: string[], codeStartLine: number): SyntaxDiagnostic[] {
+  const diagnostics: SyntaxDiagnostic[] = [];
+  let active_block: ActiveDeclarationBlock | undefined;
+
+  for (let line_index = codeStartLine; line_index < lines.length; line_index += 1) {
+    const line = lines[line_index];
+    const code_end = getCodeEndCharacter(line);
+    const trimmed_start = skipWhitespace(line, 0, code_end);
+    if (trimmed_start >= code_end || isCommentOnlyLine(line)) {
+      continue;
+    }
+
+    const closer = getDeclarationBlockCloser(line, line_index, code_end);
+    if (active_block !== undefined) {
+      if (closer !== undefined) {
+        if (closer.kind !== active_block.kind) {
+          diagnostics.push(createMalformedDeclarationBlockDiagnostic(
+            `Mismatched declaration block closer; expected ${formatDeclarationBlockCloser(active_block.kind)}.`,
+            line_index,
+            closer.start,
+            closer.end
+          ));
+        }
+        active_block = undefined;
+        continue;
+      }
+
+      diagnostics.push(...collectDeclarationBlockMemberDiagnostics(line, line_index, code_end, active_block.kind));
+      continue;
+    }
+
+    if (closer !== undefined) {
+      diagnostics.push(createMalformedDeclarationBlockDiagnostic(
+        `Unexpected ${formatDeclarationBlockCloser(closer.kind)} without a matching ${formatDeclarationBlockName(closer.kind)} block.`,
+        line_index,
+        closer.start,
+        closer.end
+      ));
+      continue;
+    }
+
+    const header = getDeclarationBlockHeader(line, line_index, code_end);
+    if (header === undefined) {
+      continue;
+    }
+
+    diagnostics.push(...header.diagnostics);
+    active_block = {
+      kind: header.kind,
+      openerLine: line_index,
+      keywordStart: header.keywordStart,
+      keywordEnd: header.keywordEnd
+    };
+  }
+
+  if (active_block !== undefined) {
+    diagnostics.push(createMalformedDeclarationBlockDiagnostic(
+      `${formatDeclarationBlockName(active_block.kind)} block is missing ${formatDeclarationBlockCloser(active_block.kind)}.`,
+      active_block.openerLine,
+      active_block.keywordStart,
+      active_block.keywordEnd
+    ));
+  }
+
+  return diagnostics;
+}
+
+function getDeclarationBlockHeader(
+  line: string,
+  lineIndex: number,
+  codeEnd: number
+): DeclarationBlockHeader | undefined {
+  const first_token = readIdentifierTokenAt(line, skipWhitespace(line, 0, codeEnd), codeEnd);
+  if (first_token === undefined) {
+    return undefined;
+  }
+
+  let keyword_token = first_token;
+  let invalid_visibility_token: CallableDeclarationToken | undefined;
+  if (first_token.lowerText === 'public' || first_token.lowerText === 'private' || first_token.lowerText === 'friend') {
+    const second_token = readIdentifierTokenAt(line, skipWhitespace(line, first_token.end, codeEnd), codeEnd);
+    if (second_token === undefined || (second_token.lowerText !== 'enum' && second_token.lowerText !== 'type')) {
+      return undefined;
+    }
+    keyword_token = second_token;
+    if (first_token.lowerText === 'friend') {
+      invalid_visibility_token = first_token;
+    }
+  }
+
+  if (keyword_token.lowerText !== 'enum' && keyword_token.lowerText !== 'type') {
+    return undefined;
+  }
+
+  const kind = keyword_token.lowerText as DeclarationBlockKind;
+  const diagnostics: SyntaxDiagnostic[] = [];
+  if (invalid_visibility_token !== undefined) {
+    diagnostics.push(createMalformedDeclarationBlockDiagnostic(
+      `${formatDeclarationBlockName(kind)} declaration has an invalid visibility modifier.`,
+      lineIndex,
+      invalid_visibility_token.start,
+      invalid_visibility_token.end
+    ));
+  }
+
+  const name_start = skipWhitespace(line, keyword_token.end, codeEnd);
+  const name_token = readIdentifierTokenAt(line, name_start, codeEnd);
+  if (name_token === undefined) {
+    diagnostics.push(createMalformedDeclarationBlockDiagnostic(
+      `${formatDeclarationBlockName(kind)} declaration is missing a name.`,
+      lineIndex,
+      name_start,
+      name_start
+    ));
+  } else {
+    const after_name = skipWhitespace(line, name_token.end, codeEnd);
+    if (after_name < codeEnd) {
+      diagnostics.push(createMalformedDeclarationBlockDiagnostic(
+        `${formatDeclarationBlockName(kind)} declaration header is malformed.`,
+        lineIndex,
+        after_name,
+        codeEnd
+      ));
+    }
+  }
+
+  return {
+    kind,
+    keywordStart: keyword_token.start,
+    keywordEnd: keyword_token.end,
+    diagnostics
+  };
+}
+
+function getDeclarationBlockCloser(
+  line: string,
+  lineIndex: number,
+  codeEnd: number
+): { kind: DeclarationBlockKind; start: number; end: number } | undefined {
+  const match = /^\s*End\s+(Enum|Type)\b/i.exec(line.slice(0, codeEnd));
+  if (match === null) {
+    return undefined;
+  }
+
+  return {
+    kind: match[1].toLowerCase() as DeclarationBlockKind,
+    start: line.search(/\S/),
+    end: match[0].length
+  };
+}
+
+function collectDeclarationBlockMemberDiagnostics(
+  line: string,
+  lineIndex: number,
+  codeEnd: number,
+  kind: DeclarationBlockKind
+): SyntaxDiagnostic[] {
+  return kind === 'enum'
+    ? collectEnumMemberDiagnostics(line, lineIndex, codeEnd)
+    : collectTypeFieldDiagnostics(line, lineIndex, codeEnd);
+}
+
+function collectEnumMemberDiagnostics(line: string, lineIndex: number, codeEnd: number): SyntaxDiagnostic[] {
+  const trimmed_start = skipWhitespace(line, 0, codeEnd);
+  const trimmed_end = trimEndIndex(line, codeEnd);
+  const first_token = readIdentifierTokenAt(line, trimmed_start, trimmed_end);
+  if (first_token === undefined) {
+    return [createMalformedDeclarationBlockDiagnostic(
+      'Enum member declaration is missing a name.',
+      lineIndex,
+      trimmed_start,
+      trimmed_end
+    )];
+  }
+
+  if (isInvalidEnumMemberStatementKeyword(first_token.lowerText)) {
+    return [createMalformedDeclarationBlockDiagnostic(
+      'Statement is not valid inside an Enum block.',
+      lineIndex,
+      trimmed_start,
+      trimmed_end
+    )];
+  }
+
+  const after_name = skipWhitespace(line, first_token.end, trimmed_end);
+  if (after_name >= trimmed_end) {
+    return [];
+  }
+
+  if (line[after_name] !== '=') {
+    return [createMalformedDeclarationBlockDiagnostic(
+      'Enum member declaration is malformed.',
+      lineIndex,
+      after_name,
+      trimmed_end
+    )];
+  }
+
+  const initializer_start = skipWhitespace(line, after_name + 1, trimmed_end);
+  if (initializer_start >= trimmed_end || !isPlausibleConstantInitializer(line.slice(initializer_start, trimmed_end))) {
+    return [createMalformedDeclarationBlockDiagnostic(
+      'Enum member initializer is malformed.',
+      lineIndex,
+      initializer_start >= trimmed_end ? after_name : initializer_start,
+      trimmed_end
+    )];
+  }
+
+  return [];
+}
+
+function isInvalidEnumMemberStatementKeyword(value: string): boolean {
+  return value === 'dim'
+    || value === 'static'
+    || value === 'public'
+    || value === 'private'
+    || value === 'const'
+    || value === 'redim'
+    || value === 'sub'
+    || value === 'function'
+    || value === 'property'
+    || value === 'event'
+    || value === 'declare'
+    || value === 'enum'
+    || value === 'type'
+    || value === 'withevents'
+    || value === 'implements';
+}
+
+function collectTypeFieldDiagnostics(line: string, lineIndex: number, codeEnd: number): SyntaxDiagnostic[] {
+  const trimmed_start = skipWhitespace(line, 0, codeEnd);
+  const trimmed_end = trimEndIndex(line, codeEnd);
+  const first_token = readIdentifierTokenAt(line, trimmed_start, trimmed_end);
+  if (first_token !== undefined && isInvalidTypeFieldStatementKeyword(first_token.lowerText)) {
+    return [createMalformedDeclarationBlockDiagnostic(
+      'Statement is not valid inside a Type block.',
+      lineIndex,
+      trimmed_start,
+      trimmed_end
+    )];
+  }
+
+  return collectDeclaratorDiagnostics(line, lineIndex, trimmed_start, trimmed_end, 'variable')
+    .map((diagnostic) => ({
+      ...diagnostic,
+      code: 'syntax.malformedDeclarationBlock' as const
+    }));
+}
+
+function isInvalidTypeFieldStatementKeyword(value: string): boolean {
+  return value === 'dim'
+    || value === 'static'
+    || value === 'public'
+    || value === 'private'
+    || value === 'const'
+    || value === 'redim'
+    || value === 'sub'
+    || value === 'function'
+    || value === 'property'
+    || value === 'event'
+    || value === 'declare'
+    || value === 'enum'
+    || value === 'type'
+    || value === 'withevents'
+    || value === 'implements';
+}
+
+function formatDeclarationBlockName(kind: DeclarationBlockKind): 'Enum' | 'Type' {
+  return kind === 'enum' ? 'Enum' : 'Type';
+}
+
+function formatDeclarationBlockCloser(kind: DeclarationBlockKind): 'End Enum' | 'End Type' {
+  return kind === 'enum' ? 'End Enum' : 'End Type';
+}
+
+function createMalformedDeclarationBlockDiagnostic(
+  message: string,
+  lineIndex: number,
+  startCharacter: number,
+  endCharacter: number
+): SyntaxDiagnostic {
+  return {
+    code: 'syntax.malformedDeclarationBlock',
     message,
     range: {
       start: { line: lineIndex, character: startCharacter },

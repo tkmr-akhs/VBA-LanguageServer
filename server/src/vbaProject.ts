@@ -153,6 +153,7 @@ export type SyntaxDiagnosticCode =
   | 'syntax.malformedDeclaration'
   | 'syntax.malformedDeclarationBlock'
   | 'syntax.malformedBlockStructure'
+  | 'syntax.malformedControlFlow'
   | 'syntax.malformedAttribute'
   | 'syntax.malformedDateLiteral'
   | 'syntax.malformedOption'
@@ -1092,6 +1093,7 @@ function collectSyntaxDiagnostics(lines: string[], codeStartLine: number): Synta
   const diagnostics = [
     ...collectHeaderSyntaxDiagnostics(lines, codeStartLine),
     ...collectDeclarationBlockDiagnostics(lines, codeStartLine),
+    ...collectControlFlowDiagnostics(lines, codeStartLine),
     ...collectBlockStructureDiagnostics(lines, codeStartLine)
   ];
   const header_diagnostic_lines = new Set(diagnostics.map((diagnostic) => diagnostic.range.start.line));
@@ -2947,35 +2949,35 @@ function getExecutableBlockOpener(
       kind: 'for',
       openerName: 'For',
       expectedCloser: 'Next',
-      pattern: /^\s*For\b/i,
+      pattern: new RegExp(`^\\s*For\\s+(?:Each\\s+${C_IDENTIFIER_PATTERN.source}\\s+In\\s+\\S|${C_IDENTIFIER_PATTERN.source}\\s*=\\s*\\S.+\\bTo\\b\\s*\\S)`, 'i'),
       keyword: 'For'
     },
     {
       kind: 'do',
       openerName: 'Do',
       expectedCloser: 'Loop',
-      pattern: /^\s*Do\b/i,
+      pattern: /^\s*Do(?:\s+(?:While|Until)\s+\S.*)?\s*$/i,
       keyword: 'Do'
     },
     {
       kind: 'while',
       openerName: 'While',
       expectedCloser: 'Wend',
-      pattern: /^\s*While\b/i,
+      pattern: /^\s*While\s+\S/i,
       keyword: 'While'
     },
     {
       kind: 'select',
       openerName: 'Select',
       expectedCloser: 'End Select',
-      pattern: /^\s*Select\s+Case\b/i,
+      pattern: /^\s*Select\s+Case\s+\S/i,
       keyword: 'Select'
     },
     {
       kind: 'with',
       openerName: 'With',
       expectedCloser: 'End With',
-      pattern: /^\s*With\b/i,
+      pattern: /^\s*With\s+\S/i,
       keyword: 'With'
     }
   ];
@@ -3188,6 +3190,252 @@ function createMalformedBlockStructureDiagnostic(
 ): SyntaxDiagnostic {
   return {
     code: 'syntax.malformedBlockStructure',
+    message,
+    range: {
+      start: { line: lineIndex, character: startCharacter },
+      end: { line: lineIndex, character: endCharacter }
+    },
+    severity: 'error',
+    source: 'vba-language-server'
+  };
+}
+
+interface ControlFlowState {
+  kind: 'if' | 'select';
+  seenElse?: boolean;
+  seenCaseElse?: boolean;
+}
+
+function collectControlFlowDiagnostics(lines: string[], codeStartLine: number): SyntaxDiagnostic[] {
+  const diagnostics: SyntaxDiagnostic[] = [];
+  const stack: ControlFlowState[] = [];
+  let skipped_declaration_block: DeclarationBlockKind | undefined;
+
+  for (let line_index = codeStartLine; line_index < lines.length; line_index += 1) {
+    const line = lines[line_index];
+    const code_end = getCodeEndCharacter(line);
+    const structure_text = getCodeTextForStructure(line).trim();
+    if (structure_text === '' || isCommentOnlyLine(line) || isHeaderLine(structure_text)) {
+      continue;
+    }
+
+    const declaration_closer = getDeclarationBlockCloser(line, line_index, code_end);
+    if (skipped_declaration_block !== undefined) {
+      if (declaration_closer?.kind === skipped_declaration_block) {
+        skipped_declaration_block = undefined;
+      }
+      continue;
+    }
+    const declaration_header = getDeclarationBlockHeader(line, line_index, code_end);
+    if (declaration_header !== undefined) {
+      skipped_declaration_block = declaration_header.kind;
+      continue;
+    }
+    if (declaration_closer !== undefined) {
+      continue;
+    }
+
+    const trimmed_start = line.search(/\S/);
+    const trimmed_end = getCodeEndCharacter(line);
+    const trimmed_code = line.slice(trimmed_start === -1 ? 0 : trimmed_start, trimmed_end).trimEnd();
+
+    if (/^If\b/i.test(trimmed_code)) {
+      if (!/\bThen\b/i.test(trimmed_code)) {
+        diagnostics.push(createMalformedControlFlowDiagnostic(
+          'If block opener must include Then.',
+          line_index,
+          trimmed_start,
+          trimmed_end
+        ));
+      } else if (/\bThen\s*$/i.test(trimmed_code)) {
+        stack.push({ kind: 'if', seenElse: false });
+      }
+      continue;
+    }
+
+    if (/^ElseIf\b/i.test(trimmed_code)) {
+      const if_state = findLastControlFlowState(stack, 'if');
+      if (!/\bThen\b/i.test(trimmed_code)) {
+        diagnostics.push(createMalformedControlFlowDiagnostic(
+          'ElseIf clause must include Then.',
+          line_index,
+          trimmed_start,
+          trimmed_end
+        ));
+      } else if (if_state?.seenElse === true) {
+        diagnostics.push(createMalformedControlFlowDiagnostic(
+          'ElseIf cannot appear after Else in the same If block.',
+          line_index,
+          trimmed_start,
+          trimmed_end
+        ));
+      }
+      continue;
+    }
+
+    if (/^Else\b/i.test(trimmed_code)) {
+      const if_state = findLastControlFlowState(stack, 'if');
+      if (if_state !== undefined) {
+        if (if_state.seenElse === true) {
+          diagnostics.push(createMalformedControlFlowDiagnostic(
+            'Else cannot appear more than once in the same If block.',
+            line_index,
+            trimmed_start,
+            trimmed_end
+          ));
+        }
+        if_state.seenElse = true;
+      }
+      continue;
+    }
+
+    if (/^End\s+If\s*$/i.test(trimmed_code)) {
+      popLastControlFlowState(stack, 'if');
+      continue;
+    }
+
+    if (/^Select\s+Case\b/i.test(trimmed_code)) {
+      if (!/^Select\s+Case\s+\S/i.test(trimmed_code)) {
+        diagnostics.push(createMalformedControlFlowDiagnostic(
+          'Select Case opener must include an expression.',
+          line_index,
+          trimmed_start,
+          trimmed_end
+        ));
+      } else {
+        stack.push({ kind: 'select', seenCaseElse: false });
+      }
+      continue;
+    }
+
+    if (/^Case\b/i.test(trimmed_code)) {
+      const select_state = findLastControlFlowState(stack, 'select');
+      const is_case_else = /^Case\s+Else\b/i.test(trimmed_code);
+      if (!is_case_else && !/^Case\s+\S/i.test(trimmed_code)) {
+        diagnostics.push(createMalformedControlFlowDiagnostic(
+          'Case clause must include an expression or Else.',
+          line_index,
+          trimmed_start,
+          trimmed_end
+        ));
+      } else if (select_state?.seenCaseElse === true && !is_case_else) {
+        diagnostics.push(createMalformedControlFlowDiagnostic(
+          'Case cannot appear after Case Else in the same Select block.',
+          line_index,
+          trimmed_start,
+          trimmed_end
+        ));
+      }
+      if (select_state !== undefined && is_case_else) {
+        select_state.seenCaseElse = true;
+      }
+      continue;
+    }
+
+    if (/^End\s+Select\s*$/i.test(trimmed_code)) {
+      popLastControlFlowState(stack, 'select');
+      continue;
+    }
+
+    if (/^For\s+Each\b/i.test(trimmed_code)) {
+      if (!new RegExp(`^For\\s+Each\\s+${C_IDENTIFIER_PATTERN.source}\\s+In\\s+\\S`, 'i').test(trimmed_code)) {
+        diagnostics.push(createMalformedControlFlowDiagnostic(
+          'For Each opener must include an item and collection expression.',
+          line_index,
+          trimmed_start,
+          trimmed_end
+        ));
+      }
+      continue;
+    }
+
+    if (/^For\b/i.test(trimmed_code)) {
+      if (!new RegExp(`^For\\s+${C_IDENTIFIER_PATTERN.source}\\s*=\\s*\\S.+\\bTo\\b\\s*\\S`, 'i').test(trimmed_code)) {
+        diagnostics.push(createMalformedControlFlowDiagnostic(
+          'For opener must include a start expression and To expression.',
+          line_index,
+          trimmed_start,
+          trimmed_end
+        ));
+      }
+      continue;
+    }
+
+    if (/^Loop\s+(?:While|Until)\b/i.test(trimmed_code) && !/^Loop\s+(?:While|Until)\s+\S/i.test(trimmed_code)) {
+      const condition_kind = /^Loop\s+While\b/i.test(trimmed_code) ? 'While' : 'Until';
+      diagnostics.push(createMalformedControlFlowDiagnostic(
+        `Loop ${condition_kind} clause must include a condition.`,
+        line_index,
+        trimmed_start,
+        trimmed_end
+      ));
+      continue;
+    }
+
+    if (/^Do\s+(?:While|Until)\b/i.test(trimmed_code) && !/^Do\s+(?:While|Until)\s+\S/i.test(trimmed_code)) {
+      const condition_kind = /^Do\s+While\b/i.test(trimmed_code) ? 'While' : 'Until';
+      diagnostics.push(createMalformedControlFlowDiagnostic(
+        `Do ${condition_kind} opener must include a condition.`,
+        line_index,
+        trimmed_start,
+        trimmed_end
+      ));
+      continue;
+    }
+
+    if (/^While\b/i.test(trimmed_code) && !/^While\s+\S/i.test(trimmed_code)) {
+      diagnostics.push(createMalformedControlFlowDiagnostic(
+        'While opener must include a condition.',
+        line_index,
+        trimmed_start,
+        trimmed_end
+      ));
+      continue;
+    }
+
+    if (/^With\b/i.test(trimmed_code) && !/^With\s+\S/i.test(trimmed_code)) {
+      diagnostics.push(createMalformedControlFlowDiagnostic(
+        'With opener must include a receiver expression.',
+        line_index,
+        trimmed_start,
+        trimmed_end
+      ));
+    }
+  }
+
+  return diagnostics;
+}
+
+function findLastControlFlowState(
+  stack: ControlFlowState[],
+  kind: ControlFlowState['kind']
+): ControlFlowState | undefined {
+  for (let stack_index = stack.length - 1; stack_index >= 0; stack_index -= 1) {
+    if (stack[stack_index].kind === kind) {
+      return stack[stack_index];
+    }
+  }
+
+  return undefined;
+}
+
+function popLastControlFlowState(stack: ControlFlowState[], kind: ControlFlowState['kind']): void {
+  for (let stack_index = stack.length - 1; stack_index >= 0; stack_index -= 1) {
+    if (stack[stack_index].kind === kind) {
+      stack.length = stack_index;
+      return;
+    }
+  }
+}
+
+function createMalformedControlFlowDiagnostic(
+  message: string,
+  lineIndex: number,
+  startCharacter: number,
+  endCharacter: number
+): SyntaxDiagnostic {
+  return {
+    code: 'syntax.malformedControlFlow',
     message,
     range: {
       start: { line: lineIndex, character: startCharacter },

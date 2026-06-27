@@ -1811,6 +1811,275 @@ test('block structure diagnostics cover cls and frm code while ignoring frm desi
   ]);
 });
 
+test('syntax diagnostics report malformed control-flow openers and clauses', () => {
+  const if_line = '    If ready';
+  const elseif_line = '    ElseIf pending';
+  const select_line = '    Select Case';
+  const case_line = '    Case';
+  const for_line = '    For index = 1';
+  const for_each_line = '    For Each item In';
+  const loop_line = '    Loop While';
+  const with_line = '    With';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Flow.bas',
+      text: [
+        'Attribute VB_Name = "Flow"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        if_line,
+        elseif_line,
+        select_line,
+        case_line,
+        for_line,
+        for_each_line,
+        loop_line,
+        with_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Flow.bas'), [
+    {
+      code: 'syntax.malformedControlFlow',
+      message: 'If block opener must include Then.',
+      range: {
+        start: { line: 4, character: if_line.search(/\S/) },
+        end: { line: 4, character: if_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedControlFlow',
+      message: 'ElseIf clause must include Then.',
+      range: {
+        start: { line: 5, character: elseif_line.search(/\S/) },
+        end: { line: 5, character: elseif_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedControlFlow',
+      message: 'Select Case opener must include an expression.',
+      range: {
+        start: { line: 6, character: select_line.search(/\S/) },
+        end: { line: 6, character: select_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedControlFlow',
+      message: 'Case clause must include an expression or Else.',
+      range: {
+        start: { line: 7, character: case_line.search(/\S/) },
+        end: { line: 7, character: case_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedControlFlow',
+      message: 'For opener must include a start expression and To expression.',
+      range: {
+        start: { line: 8, character: for_line.search(/\S/) },
+        end: { line: 8, character: for_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedControlFlow',
+      message: 'For Each opener must include an item and collection expression.',
+      range: {
+        start: { line: 9, character: for_each_line.search(/\S/) },
+        end: { line: 9, character: for_each_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedControlFlow',
+      message: 'Loop While clause must include a condition.',
+      range: {
+        start: { line: 10, character: loop_line.search(/\S/) },
+        end: { line: 10, character: loop_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedControlFlow',
+      message: 'With opener must include a receiver expression.',
+      range: {
+        start: { line: 11, character: with_line.search(/\S/) },
+        end: { line: 11, character: with_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+});
+
+test('syntax diagnostics report out-of-order Else and Case clauses', () => {
+  const late_elseif_line = '    ElseIf pending Then';
+  const duplicate_else_line = '    Else';
+  const late_case_line = '    Case 1';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Flow.bas',
+      text: [
+        'Attribute VB_Name = "Flow"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    If ready Then',
+        '    Else',
+        late_elseif_line,
+        duplicate_else_line,
+        '    End If',
+        '    Select Case mode',
+        '    Case Else',
+        late_case_line,
+        '    End Select',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Flow.bas'), [
+    {
+      code: 'syntax.malformedControlFlow',
+      message: 'ElseIf cannot appear after Else in the same If block.',
+      range: {
+        start: { line: 6, character: late_elseif_line.search(/\S/) },
+        end: { line: 6, character: late_elseif_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedControlFlow',
+      message: 'Else cannot appear more than once in the same If block.',
+      range: {
+        start: { line: 7, character: duplicate_else_line.search(/\S/) },
+        end: { line: 7, character: duplicate_else_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedControlFlow',
+      message: 'Case cannot appear after Case Else in the same Select block.',
+      range: {
+        start: { line: 11, character: late_case_line.search(/\S/) },
+        end: { line: 11, character: late_case_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+});
+
+test('syntax diagnostics ignore valid control-flow forms in bas cls and frm code', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Flow.bas',
+      text: [
+        'Attribute VB_Name = "Flow"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    If ready Then value = 1 Else value = 2',
+        '    If ready Then',
+        '    ElseIf pending Then',
+        '    Else',
+        '    End If',
+        'End Sub'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/Runner.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "Runner"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    For Each item In items',
+        '        Do While item.Ready',
+        '        Loop Until item.Done',
+        '        While item.Pending',
+        '        Wend',
+        '    Next item',
+        '    With item',
+        '    End With',
+        'End Sub'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/Dialog.frm',
+      text: [
+        'VERSION 5.00',
+        'Begin VB.Form Dialog',
+        '  Caption = "If ready"',
+        'End',
+        'Attribute VB_Name = "Dialog"',
+        'Option Explicit',
+        'Public Sub Run()',
+        '    Select Case mode',
+        '    Case 1',
+        '    Case Else',
+        '    End Select',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Flow.bas'), []);
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Runner.cls'), []);
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Dialog.frm'), []);
+});
+
+test('malformed With receiver syntax fails closed without guessed member completion', () => {
+  const with_line = '    With';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Flow.bas',
+      text: [
+        'Attribute VB_Name = "Flow"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        with_line,
+        '        .Na',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Flow.bas'), [
+    {
+      code: 'syntax.malformedControlFlow',
+      message: 'With opener must include a receiver expression.',
+      range: {
+        start: { line: 4, character: with_line.search(/\S/) },
+        end: { line: 4, character: with_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+  assert.deepEqual(getCompletions(project, {
+    uri: 'file:///project/Flow.bas',
+    position: { line: 5, character: 11 }
+  }), []);
+});
+
 test('syntax diagnostics cover cls and frm code while ignoring frm designer text', () => {
   const class_invalid_line = '        "needle", _ \' class';
   const form_invalid_line = '        "needle", _ \' form';

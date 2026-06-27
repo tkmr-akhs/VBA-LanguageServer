@@ -148,7 +148,9 @@ export type SyntaxDiagnosticSeverity = 'error';
 export type SyntaxDiagnosticCode =
   | 'syntax.invalidTrailingCommentContinuation'
   | 'syntax.invalidSourceCharacter'
+  | 'syntax.invalidStatementSeparator'
   | 'syntax.malformedDateLiteral'
+  | 'syntax.unexpectedToken'
   | 'syntax.unterminatedDateLiteral'
   | 'syntax.unterminatedStringLiteral';
 
@@ -1083,7 +1085,8 @@ function collectSyntaxDiagnostics(lines: string[], codeStartLine: number): Synta
   const diagnostics: SyntaxDiagnostic[] = [];
   for (let line_index = codeStartLine; line_index < lines.length; line_index += 1) {
     const line = lines[line_index];
-    diagnostics.push(...collectLexicalSyntaxDiagnostics(line, line_index));
+    const lexical_diagnostics = collectLexicalSyntaxDiagnostics(line, line_index);
+    diagnostics.push(...lexical_diagnostics);
 
     const invalid_trailing_comment_range = getInvalidTrailingCommentContinuationRange(line, line_index);
     if (invalid_trailing_comment_range !== undefined) {
@@ -1094,6 +1097,10 @@ function collectSyntaxDiagnostics(lines: string[], codeStartLine: number): Synta
         severity: 'error',
         source: 'vba-language-server'
       });
+    }
+
+    if (lexical_diagnostics.length === 0 && invalid_trailing_comment_range === undefined) {
+      diagnostics.push(...collectStatementBoundaryDiagnostics(line, line_index));
     }
   }
 
@@ -1242,6 +1249,249 @@ function isRemCommentStart(line: string, characterIndex: number): boolean {
 
   const before = line.slice(0, characterIndex).trimEnd();
   return before === '' || before.endsWith(':');
+}
+
+interface StatementSegment {
+  start: number;
+  end: number;
+  terminator?: number;
+  text: string;
+}
+
+function collectStatementBoundaryDiagnostics(line: string, lineIndex: number): SyntaxDiagnostic[] {
+  const diagnostics: SyntaxDiagnostic[] = [];
+  const segments = getStatementSegments(line);
+
+  for (let segment_index = 0; segment_index < segments.length; segment_index += 1) {
+    const segment = segments[segment_index];
+    if (segment.terminator !== undefined && segment.text.trim() === '') {
+      diagnostics.push({
+        code: 'syntax.invalidStatementSeparator',
+        message: 'Statement separator cannot create an empty statement.',
+        range: {
+          start: { line: lineIndex, character: segment.terminator },
+          end: { line: lineIndex, character: segment.terminator + 1 }
+        },
+        severity: 'error',
+        source: 'vba-language-server'
+      });
+      continue;
+    }
+
+    if (isLabelOnlySegment(segment, segment_index)) {
+      continue;
+    }
+
+    const statement = getStatementBoundaryText(segment);
+    if (statement.text === '') {
+      continue;
+    }
+
+    if (/[,;)\]]/.test(statement.text[0])) {
+      diagnostics.push({
+        code: 'syntax.unexpectedToken',
+        message: 'Unexpected token at statement start.',
+        range: {
+          start: { line: lineIndex, character: statement.start },
+          end: { line: lineIndex, character: statement.start + 1 }
+        },
+        severity: 'error',
+        source: 'vba-language-server'
+      });
+      continue;
+    }
+
+    const unexpected_range = getUnexpectedTokenAfterCompleteStatementRange(statement.text, statement.start, lineIndex);
+    if (unexpected_range !== undefined) {
+      diagnostics.push({
+        code: 'syntax.unexpectedToken',
+        message: 'Unexpected token after a complete statement.',
+        range: unexpected_range,
+        severity: 'error',
+        source: 'vba-language-server'
+      });
+      continue;
+    }
+
+    const next_unexpected_range = getUnexpectedTokenAfterNextStatementRange(statement.text, statement.start, lineIndex);
+    if (next_unexpected_range !== undefined) {
+      diagnostics.push({
+        code: 'syntax.unexpectedToken',
+        message: 'Unexpected token after a complete statement.',
+        range: next_unexpected_range,
+        severity: 'error',
+        source: 'vba-language-server'
+      });
+    }
+  }
+
+  return diagnostics;
+}
+
+function getStatementSegments(line: string): StatementSegment[] {
+  const segments: StatementSegment[] = [];
+  let segment_start = 0;
+  let character_index = 0;
+
+  while (character_index < line.length) {
+    const character = line[character_index];
+    if (character === "'" || isRemCommentStart(line, character_index)) {
+      break;
+    }
+
+    if (character === '"') {
+      const string_end = getStringLiteralEnd(line, character_index);
+      if (string_end === undefined) {
+        break;
+      }
+
+      character_index = string_end;
+      continue;
+    }
+
+    if (character === '#' && !shouldSkipHashCharacter(line, character_index)) {
+      const closing_index = line.indexOf('#', character_index + 1);
+      if (closing_index === -1) {
+        break;
+      }
+
+      character_index = closing_index + 1;
+      continue;
+    }
+
+    if (character === ':') {
+      segments.push({
+        start: segment_start,
+        end: character_index,
+        terminator: character_index,
+        text: line.slice(segment_start, character_index)
+      });
+      segment_start = character_index + 1;
+    }
+
+    character_index += 1;
+  }
+
+  segments.push({
+    start: segment_start,
+    end: character_index,
+    text: line.slice(segment_start, character_index)
+  });
+  return segments;
+}
+
+function isLabelOnlySegment(segment: StatementSegment, segmentIndex: number): boolean {
+  return segmentIndex === 0
+    && segment.terminator !== undefined
+    && /^(?:\d+|[A-Za-z_][A-Za-z0-9_]*)$/.test(segment.text.trim());
+}
+
+function getStatementBoundaryText(segment: StatementSegment): { text: string; start: number } {
+  const leading_whitespace = /^\s*/.exec(segment.text)?.[0].length ?? 0;
+  let text = segment.text.slice(leading_whitespace);
+  let start = segment.start + leading_whitespace;
+  const line_number = /^\d+\s+/.exec(text);
+  if (line_number !== null) {
+    text = text.slice(line_number[0].length);
+    start += line_number[0].length;
+  }
+
+  return {
+    text: text.trimEnd(),
+    start
+  };
+}
+
+function getUnexpectedTokenAfterCompleteStatementRange(
+  text: string,
+  startCharacter: number,
+  lineIndex: number
+): SourceRange | undefined {
+  const complete_statement_patterns = [
+    /^Option\s+Explicit\b/i,
+    /^Option\s+Base\s+[01]\b/i,
+    /^Option\s+Compare\s+(?:Binary|Text|Database)\b/i,
+    /^End\s+(?:Sub|Function|Property|If|Select|With|Enum|Type)\b/i,
+    /^Exit\s+(?:Sub|Function|Property|For|Do)\b/i,
+    /^Wend\b/i,
+    /^Else\b/i,
+    /^Case\s+Else\b/i,
+    /^Loop\b(?!\s+(?:While|Until)\b)/i
+  ];
+
+  for (const pattern of complete_statement_patterns) {
+    const match = pattern.exec(text);
+    if (match === null) {
+      continue;
+    }
+
+    const rest = text.slice(match[0].length);
+    const unexpected_match = /\S/.exec(rest);
+    if (unexpected_match === null) {
+      return undefined;
+    }
+
+    const unexpected_start = startCharacter + match[0].length + unexpected_match.index;
+    return {
+      start: { line: lineIndex, character: unexpected_start },
+      end: { line: lineIndex, character: startCharacter + text.length }
+    };
+  }
+
+  return undefined;
+}
+
+function getUnexpectedTokenAfterNextStatementRange(
+  text: string,
+  startCharacter: number,
+  lineIndex: number
+): SourceRange | undefined {
+  const next_match = /^Next\b/i.exec(text);
+  if (next_match === null) {
+    return undefined;
+  }
+
+  let character_index = skipWhitespace(text, next_match[0].length, text.length);
+  if (character_index >= text.length) {
+    return undefined;
+  }
+
+  while (character_index < text.length) {
+    if (!isIdentifierStart(text[character_index])) {
+      return {
+        start: { line: lineIndex, character: startCharacter + character_index },
+        end: { line: lineIndex, character: startCharacter + text.length }
+      };
+    }
+
+    character_index += 1;
+    while (character_index < text.length && isIdentifierPart(text[character_index])) {
+      character_index += 1;
+    }
+
+    character_index = skipWhitespace(text, character_index, text.length);
+    if (character_index >= text.length) {
+      return undefined;
+    }
+
+    if (text[character_index] !== ',') {
+      return {
+        start: { line: lineIndex, character: startCharacter + character_index },
+        end: { line: lineIndex, character: startCharacter + text.length }
+      };
+    }
+
+    character_index += 1;
+    character_index = skipWhitespace(text, character_index, text.length);
+    if (character_index >= text.length) {
+      return {
+        start: { line: lineIndex, character: startCharacter + text.lastIndexOf(',') },
+        end: { line: lineIndex, character: startCharacter + text.length }
+      };
+    }
+  }
+
+  return undefined;
 }
 
 function getInvalidTrailingCommentContinuationRange(line: string, lineIndex: number): SourceRange | undefined {

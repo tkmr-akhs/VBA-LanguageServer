@@ -395,6 +395,214 @@ test('lexical syntax diagnostics preserve valid regions and invalid fail-closed 
   );
 });
 
+test('syntax diagnostics report unexpected tokens after complete statements', () => {
+  const option_line = 'Option Explicit extra';
+  const exit_line = '    Exit Sub extra';
+  const next_line = '    Next index extra';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        option_line,
+        '',
+        'Public Sub Run()',
+        exit_line,
+        next_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Worker.bas'), [
+    {
+      code: 'syntax.unexpectedToken',
+      message: 'Unexpected token after a complete statement.',
+      range: {
+        start: { line: 1, character: option_line.indexOf('extra') },
+        end: { line: 1, character: option_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.unexpectedToken',
+      message: 'Unexpected token after a complete statement.',
+      range: {
+        start: { line: 4, character: exit_line.indexOf('extra') },
+        end: { line: 4, character: exit_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.unexpectedToken',
+      message: 'Unexpected token after a complete statement.',
+      range: {
+        start: { line: 5, character: next_line.indexOf('extra') },
+        end: { line: 5, character: next_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+});
+
+test('syntax diagnostics report malformed statement separators and stray punctuation', () => {
+  const separator_line = '    Debug.Print "x" :: Debug.Print "y"';
+  const punctuation_line = '    , value = 1';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        separator_line,
+        punctuation_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Worker.bas'), [
+    {
+      code: 'syntax.invalidStatementSeparator',
+      message: 'Statement separator cannot create an empty statement.',
+      range: {
+        start: { line: 4, character: separator_line.lastIndexOf(':') },
+        end: { line: 4, character: separator_line.lastIndexOf(':') + 1 }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.unexpectedToken',
+      message: 'Unexpected token at statement start.',
+      range: {
+        start: { line: 5, character: punctuation_line.indexOf(',') },
+        end: { line: 5, character: punctuation_line.indexOf(',') + 1 }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+});
+
+test('syntax diagnostics ignore valid statement boundaries labels line numbers and comments', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        'Start:',
+        '10 Debug.Print "x": Debug.Print "y": GoTo Start',
+        '    value = 1 \' End Sub extra :: ,',
+        '    Rem End Sub extra :: ,',
+        '    Next index, other_index',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Worker.bas'), []);
+});
+
+test('unexpected-token diagnostics cover cls and frm code while ignoring frm designer text', () => {
+  const class_invalid_line = '    Wend extra';
+  const form_invalid_line = '    End If extra';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        class_invalid_line,
+        'End Sub'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/Dialog.frm',
+      text: [
+        'VERSION 5.00',
+        'Begin VB.Form Dialog',
+        '  Caption = "End If extra"',
+        'End',
+        'Attribute VB_Name = "Dialog"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        form_invalid_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Worker.cls'), [
+    {
+      code: 'syntax.unexpectedToken',
+      message: 'Unexpected token after a complete statement.',
+      range: {
+        start: { line: 5, character: class_invalid_line.indexOf('extra') },
+        end: { line: 5, character: class_invalid_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Dialog.frm'), [
+    {
+      code: 'syntax.unexpectedToken',
+      message: 'Unexpected token after a complete statement.',
+      range: {
+        start: { line: 8, character: form_invalid_line.indexOf('extra') },
+        end: { line: 8, character: form_invalid_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+});
+
+test('unexpected-token diagnostics preserve valid statements before and after recovery', () => {
+  const invalid_line = '    Exit Sub extra';
+  const chain_line = '    Application.ActiveWorkbook.Worksheets(1).Range("A1").Fi';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    Debug.Print "before"',
+        invalid_line,
+        'End Sub',
+        '',
+        'Public Sub ValidRegion()',
+        chain_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  assert.equal(getSyntaxDiagnostics(project, 'file:///project/Worker.bas').length, 1);
+  assert.deepEqual(
+    getCompletions(project, {
+      uri: 'file:///project/Worker.bas',
+      position: { line: 9, character: chain_line.length }
+    }).map((item) => ({ label: item.label, detail: item.detail })),
+    [{ label: 'Find', detail: 'Excel.Find' }]
+  );
+});
+
 test('syntax diagnostics cover cls and frm code while ignoring frm designer text', () => {
   const class_invalid_line = '        "needle", _ \' class';
   const form_invalid_line = '        "needle", _ \' form';

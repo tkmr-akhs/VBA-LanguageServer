@@ -149,6 +149,7 @@ export type SyntaxDiagnosticCode =
   | 'syntax.invalidTrailingCommentContinuation'
   | 'syntax.invalidSourceCharacter'
   | 'syntax.invalidStatementSeparator'
+  | 'syntax.malformedCallableDeclaration'
   | 'syntax.malformedAttribute'
   | 'syntax.malformedDateLiteral'
   | 'syntax.malformedOption'
@@ -1096,6 +1097,11 @@ function collectSyntaxDiagnostics(lines: string[], codeStartLine: number): Synta
     const lexical_diagnostics = collectLexicalSyntaxDiagnostics(line, line_index);
     diagnostics.push(...lexical_diagnostics);
 
+    const callable_diagnostics = lexical_diagnostics.length === 0
+      ? collectCallableDeclarationDiagnostics(line, line_index)
+      : [];
+    diagnostics.push(...callable_diagnostics);
+
     const invalid_trailing_comment_range = getInvalidTrailingCommentContinuationRange(line, line_index);
     if (invalid_trailing_comment_range !== undefined) {
       diagnostics.push({
@@ -1107,7 +1113,11 @@ function collectSyntaxDiagnostics(lines: string[], codeStartLine: number): Synta
       });
     }
 
-    if (lexical_diagnostics.length === 0 && invalid_trailing_comment_range === undefined) {
+    if (
+      lexical_diagnostics.length === 0
+      && callable_diagnostics.length === 0
+      && invalid_trailing_comment_range === undefined
+    ) {
       diagnostics.push(...collectStatementBoundaryDiagnostics(line, line_index));
     }
   }
@@ -1431,6 +1441,484 @@ function isRemCommentStart(line: string, characterIndex: number): boolean {
 
   const before = line.slice(0, characterIndex).trimEnd();
   return before === '' || before.endsWith(':');
+}
+
+interface CallableDeclarationHead {
+  kind: 'sub' | 'function' | 'property' | 'event' | 'declare';
+  propertyKind?: 'Get' | 'Let' | 'Set';
+  headEnd: number;
+}
+
+interface CallableDeclarationToken {
+  text: string;
+  lowerText: string;
+  start: number;
+  end: number;
+}
+
+function collectCallableDeclarationDiagnostics(line: string, lineIndex: number): SyntaxDiagnostic[] {
+  const code_end = getCodeEndCharacter(line);
+  const modifier_diagnostic = getCallableModifierDiagnostic(line, lineIndex, code_end);
+  if (modifier_diagnostic !== undefined) {
+    return [modifier_diagnostic];
+  }
+
+  const head = getCallableDeclarationHead(line, code_end);
+  if (head === undefined) {
+    return [];
+  }
+
+  if (head.kind === 'declare') {
+    return collectDeclareDeclarationDiagnostics(line, lineIndex, code_end);
+  }
+
+  const name_start = skipWhitespace(line, head.headEnd, code_end);
+  if (name_start >= code_end || !isIdentifierStart(line[name_start])) {
+    return [createMalformedCallableDiagnostic(
+      'Callable declaration is missing a name.',
+      lineIndex,
+      name_start,
+      name_start
+    )];
+  }
+
+  const name_end = readIdentifierEnd(line, name_start, code_end);
+  const opening_paren = line.indexOf('(', name_end);
+  let signature_tail_start = name_end;
+  if (opening_paren !== -1 && opening_paren < code_end) {
+    const closing_paren = findClosingParenInCode(line, opening_paren, code_end);
+    if (closing_paren === undefined) {
+      return [createMalformedCallableDiagnostic(
+        'Callable parameter list is missing a closing parenthesis.',
+        lineIndex,
+        opening_paren,
+        code_end
+      )];
+    }
+
+    const parameter_diagnostics = collectParameterListDiagnostics(
+      line,
+      lineIndex,
+      opening_paren + 1,
+      closing_paren
+    );
+    if (parameter_diagnostics.length > 0) {
+      return parameter_diagnostics;
+    }
+
+    signature_tail_start = closing_paren + 1;
+  }
+
+  const return_type_diagnostic = getMalformedReturnTypeDiagnostic(
+    line,
+    lineIndex,
+    signature_tail_start,
+    code_end
+  );
+  return return_type_diagnostic === undefined ? [] : [return_type_diagnostic];
+}
+
+function getCallableModifierDiagnostic(
+  line: string,
+  lineIndex: number,
+  codeEnd: number
+): SyntaxDiagnostic | undefined {
+  const tokens = readLeadingIdentifierTokens(line, codeEnd);
+  const callable_index = tokens.findIndex((token) => isCallableDeclarationToken(token));
+  if (callable_index === -1) {
+    return undefined;
+  }
+
+  let visibility_token: CallableDeclarationToken | undefined;
+  let static_token: CallableDeclarationToken | undefined;
+  for (let token_index = 0; token_index < callable_index; token_index += 1) {
+    const token = tokens[token_index];
+    if (isVisibilityModifier(token)) {
+      if (static_token !== undefined) {
+        return createMalformedCallableDiagnostic(
+          'Visibility modifier must precede Static in a callable declaration.',
+          lineIndex,
+          token.start,
+          token.end
+        );
+      }
+      if (visibility_token !== undefined) {
+        return createMalformedCallableDiagnostic(
+          'Callable declaration has incompatible visibility modifiers.',
+          lineIndex,
+          token.start,
+          token.end
+        );
+      }
+      visibility_token = token;
+      continue;
+    }
+
+    if (token.lowerText === 'static') {
+      if (static_token !== undefined) {
+        return createMalformedCallableDiagnostic(
+          'Static modifier cannot be repeated in a callable declaration.',
+          lineIndex,
+          token.start,
+          token.end
+        );
+      }
+      static_token = token;
+      continue;
+    }
+
+    return undefined;
+  }
+
+  const callable_token = tokens[callable_index];
+  if (callable_token.lowerText === 'declare') {
+    if (static_token !== undefined) {
+      return createMalformedCallableDiagnostic(
+        'Static modifier is not valid for Declare statements.',
+        lineIndex,
+        static_token.start,
+        static_token.end
+      );
+    }
+    if (visibility_token?.lowerText === 'friend') {
+      return createMalformedCallableDiagnostic(
+        'Friend modifier is not valid for Declare statements.',
+        lineIndex,
+        visibility_token.start,
+        visibility_token.end
+      );
+    }
+  }
+
+  return undefined;
+}
+
+function readLeadingIdentifierTokens(line: string, codeEnd: number): CallableDeclarationToken[] {
+  const tokens: CallableDeclarationToken[] = [];
+  let character_index = skipWhitespace(line, 0, codeEnd);
+  while (character_index < codeEnd && isIdentifierStart(line[character_index])) {
+    const token_start = character_index;
+    const token_end = readIdentifierEnd(line, token_start, codeEnd);
+    const text = line.slice(token_start, token_end);
+    tokens.push({
+      text,
+      lowerText: text.toLowerCase(),
+      start: token_start,
+      end: token_end
+    });
+    character_index = skipWhitespace(line, token_end, codeEnd);
+  }
+
+  return tokens;
+}
+
+function isCallableDeclarationToken(token: CallableDeclarationToken): boolean {
+  return token.lowerText === 'sub'
+    || token.lowerText === 'function'
+    || token.lowerText === 'property'
+    || token.lowerText === 'event'
+    || token.lowerText === 'declare';
+}
+
+function isVisibilityModifier(token: CallableDeclarationToken): boolean {
+  return token.lowerText === 'public'
+    || token.lowerText === 'private'
+    || token.lowerText === 'friend';
+}
+
+function getCallableDeclarationHead(line: string, codeEnd: number): CallableDeclarationHead | undefined {
+  const code_text = line.slice(0, codeEnd);
+  const match =
+    /^\s*(?:(?:Public|Private|Friend|Static)\s+)*(?:(Sub|Function|Event)\b|Property\s+(Get|Let|Set)\b|Declare\b)/i.exec(code_text);
+  if (match === null) {
+    return undefined;
+  }
+
+  if (/Declare\b/i.test(match[0])) {
+    return {
+      kind: 'declare',
+      headEnd: match[0].length
+    };
+  }
+  if (match[2] !== undefined) {
+    return {
+      kind: 'property',
+      propertyKind: canonicalPropertyKind(match[2]),
+      headEnd: match[0].length
+    };
+  }
+
+  return {
+    kind: match[1].toLowerCase() as 'sub' | 'function' | 'event',
+    headEnd: match[0].length
+  };
+}
+
+function collectDeclareDeclarationDiagnostics(
+  line: string,
+  lineIndex: number,
+  codeEnd: number
+): SyntaxDiagnostic[] {
+  const declare_match =
+    /^\s*(?:(?:Public|Private)\s+)?Declare\s+(?:PtrSafe\s+)?(?:Sub|Function)\s+([A-Za-z_][A-Za-z0-9_]*)\b/i.exec(line.slice(0, codeEnd));
+  if (declare_match === null) {
+    const declare_start = line.search(/\bDeclare\b/i);
+    return [createMalformedCallableDiagnostic(
+      'Declare statement is missing a Sub or Function name.',
+      lineIndex,
+      declare_start === -1 ? 0 : declare_start,
+      codeEnd
+    )];
+  }
+
+  const name = declare_match[1];
+  const name_start = line.indexOf(name, declare_match.index);
+  if (!/\bLib\s+"(?:""|[^"])*"/i.test(line.slice(name_start, codeEnd))) {
+    return [createMalformedCallableDiagnostic(
+      'Declare statement must specify Lib "library".',
+      lineIndex,
+      name_start,
+      codeEnd
+    )];
+  }
+
+  const opening_paren = line.indexOf('(', name_start + name.length);
+  if (opening_paren !== -1 && opening_paren < codeEnd) {
+    const closing_paren = findClosingParenInCode(line, opening_paren, codeEnd);
+    if (closing_paren === undefined) {
+      return [createMalformedCallableDiagnostic(
+        'Callable parameter list is missing a closing parenthesis.',
+        lineIndex,
+        opening_paren,
+        codeEnd
+      )];
+    }
+
+    const parameter_diagnostics = collectParameterListDiagnostics(
+      line,
+      lineIndex,
+      opening_paren + 1,
+      closing_paren
+    );
+    if (parameter_diagnostics.length > 0) {
+      return parameter_diagnostics;
+    }
+  }
+
+  return [];
+}
+
+function collectParameterListDiagnostics(
+  line: string,
+  lineIndex: number,
+  startCharacter: number,
+  endCharacter: number
+): SyntaxDiagnostic[] {
+  if (startCharacter === endCharacter) {
+    return [];
+  }
+
+  const segments = splitParameterSegments(line, startCharacter, endCharacter);
+  for (let segment_index = 0; segment_index < segments.length; segment_index += 1) {
+    const segment = segments[segment_index];
+    const trimmed_start = skipWhitespace(line, segment.start, segment.end);
+    const trimmed_end = trimEndIndex(line, segment.end);
+    if (trimmed_start >= trimmed_end) {
+      return [createMalformedCallableDiagnostic(
+        'Parameter declaration is missing.',
+        lineIndex,
+        segment.start,
+        segment.end
+      )];
+    }
+
+    const segment_text = line.slice(trimmed_start, trimmed_end);
+    const parameter_match =
+      /^(?:(?:Optional|ByVal|ByRef|ParamArray)\s+)*([A-Za-z_][A-Za-z0-9_]*)\b/i.exec(segment_text);
+    if (parameter_match === null) {
+      return [createMalformedCallableDiagnostic(
+        'Parameter declaration is missing a name.',
+        lineIndex,
+        trimmed_start,
+        trimmed_end
+      )];
+    }
+
+    const optional_match = /\bOptional\b/i.exec(segment_text);
+    const param_array_match = /\bParamArray\b/i.exec(segment_text);
+    if (optional_match !== null && param_array_match !== null) {
+      return [createMalformedCallableDiagnostic(
+        'ParamArray cannot be combined with Optional.',
+        lineIndex,
+        trimmed_start + param_array_match.index,
+        trimmed_start + param_array_match.index + param_array_match[0].length
+      )];
+    }
+    if (param_array_match !== null && segment_index < segments.length - 1) {
+      return [createMalformedCallableDiagnostic(
+        'ParamArray must be the final parameter.',
+        lineIndex,
+        trimmed_start + param_array_match.index,
+        trimmed_start + param_array_match.index + param_array_match[0].length
+      )];
+    }
+
+    const default_value_match = /=\s*$/i.exec(segment_text);
+    if (default_value_match !== null) {
+      const equals_index = line.indexOf('=', trimmed_start);
+      return [createMalformedCallableDiagnostic(
+        'Optional parameter default value is missing.',
+        lineIndex,
+        equals_index,
+        equals_index + 1
+      )];
+    }
+  }
+
+  return [];
+}
+
+function getMalformedReturnTypeDiagnostic(
+  line: string,
+  lineIndex: number,
+  startCharacter: number,
+  codeEnd: number
+): SyntaxDiagnostic | undefined {
+  const return_text = line.slice(startCharacter, codeEnd);
+  const as_match = /\bAs\b/i.exec(return_text);
+  if (as_match === null) {
+    return undefined;
+  }
+
+  const as_start = startCharacter + as_match.index;
+  const type_start = skipWhitespace(line, as_start + as_match[0].length, codeEnd);
+  if (type_start >= codeEnd || !isIdentifierStart(line[type_start])) {
+    return createMalformedCallableDiagnostic(
+      'Callable return type is missing after As.',
+      lineIndex,
+      as_start,
+      codeEnd
+    );
+  }
+
+  return undefined;
+}
+
+function splitParameterSegments(
+  line: string,
+  startCharacter: number,
+  endCharacter: number
+): Array<{ start: number; end: number }> {
+  const segments: Array<{ start: number; end: number }> = [];
+  let segment_start = startCharacter;
+  let character_index = startCharacter;
+  let is_in_string = false;
+
+  while (character_index < endCharacter) {
+    const character = line[character_index];
+    if (is_in_string) {
+      if (character === '"') {
+        if (line[character_index + 1] === '"') {
+          character_index += 2;
+          continue;
+        }
+
+        is_in_string = false;
+      }
+      character_index += 1;
+      continue;
+    }
+
+    if (character === '"') {
+      is_in_string = true;
+      character_index += 1;
+      continue;
+    }
+    if (character === ',') {
+      segments.push({ start: segment_start, end: character_index });
+      segment_start = character_index + 1;
+    }
+
+    character_index += 1;
+  }
+
+  segments.push({ start: segment_start, end: endCharacter });
+  return segments;
+}
+
+function findClosingParenInCode(line: string, openParen: number, endCharacter: number): number | undefined {
+  let character_index = openParen + 1;
+  let is_in_string = false;
+
+  while (character_index < endCharacter) {
+    const character = line[character_index];
+    if (is_in_string) {
+      if (character === '"') {
+        if (line[character_index + 1] === '"') {
+          character_index += 2;
+          continue;
+        }
+
+        is_in_string = false;
+      }
+      character_index += 1;
+      continue;
+    }
+
+    if (character === '"') {
+      is_in_string = true;
+    } else if (character === ')') {
+      return character_index;
+    }
+
+    character_index += 1;
+  }
+
+  return undefined;
+}
+
+function createMalformedCallableDiagnostic(
+  message: string,
+  lineIndex: number,
+  startCharacter: number,
+  endCharacter: number
+): SyntaxDiagnostic {
+  return {
+    code: 'syntax.malformedCallableDeclaration',
+    message,
+    range: {
+      start: { line: lineIndex, character: startCharacter },
+      end: { line: lineIndex, character: endCharacter }
+    },
+    severity: 'error',
+    source: 'vba-language-server'
+  };
+}
+
+function readIdentifierEnd(line: string, startCharacter: number, endCharacter: number): number {
+  let character_index = startCharacter + 1;
+  while (character_index < endCharacter && isIdentifierPart(line[character_index])) {
+    character_index += 1;
+  }
+
+  return character_index;
+}
+
+function trimEndIndex(line: string, endCharacter: number): number {
+  let character_index = endCharacter;
+  while (character_index > 0 && /\s/.test(line[character_index - 1])) {
+    character_index -= 1;
+  }
+
+  return character_index;
+}
+
+function canonicalPropertyKind(value: string): 'Get' | 'Let' | 'Set' {
+  const lower_value = value.toLowerCase();
+  if (lower_value === 'let') {
+    return 'Let';
+  }
+  return lower_value === 'set' ? 'Set' : 'Get';
 }
 
 interface StatementSegment {

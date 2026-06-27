@@ -808,6 +808,277 @@ test('frm header boundary ignores designer text and diagnoses code after Attribu
   ]);
 });
 
+test('syntax diagnostics report malformed callable declaration signatures', () => {
+  const missing_name_line = 'Public Sub';
+  const missing_paren_line = 'Public Function ReadValue(ByVal Key As String';
+  const missing_return_type_line = 'Public Function Convert() As';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        missing_name_line,
+        missing_paren_line,
+        'End Function',
+        missing_return_type_line,
+        'End Function'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Worker.bas'), [
+    {
+      code: 'syntax.malformedCallableDeclaration',
+      message: 'Callable declaration is missing a name.',
+      range: {
+        start: { line: 3, character: missing_name_line.length },
+        end: { line: 3, character: missing_name_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedCallableDeclaration',
+      message: 'Callable parameter list is missing a closing parenthesis.',
+      range: {
+        start: { line: 4, character: missing_paren_line.indexOf('(') },
+        end: { line: 4, character: missing_paren_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedCallableDeclaration',
+      message: 'Callable return type is missing after As.',
+      range: {
+        start: { line: 6, character: missing_return_type_line.indexOf('As') },
+        end: { line: 6, character: missing_return_type_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+});
+
+test('syntax diagnostics report malformed callable parameter lists and Declare statements', () => {
+  const invalid_paramarray_line = 'Public Sub Run(Optional ParamArray Values() As Variant)';
+  const empty_default_line = 'Public Function Read(Optional ByVal Fallback As String = ) As String';
+  const missing_lib_line = 'Public Declare PtrSafe Function FindWindow(ByVal Caption As String) As LongPtr';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        invalid_paramarray_line,
+        'End Sub',
+        empty_default_line,
+        'End Function',
+        missing_lib_line
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Worker.bas'), [
+    {
+      code: 'syntax.malformedCallableDeclaration',
+      message: 'ParamArray cannot be combined with Optional.',
+      range: {
+        start: { line: 3, character: invalid_paramarray_line.indexOf('ParamArray') },
+        end: { line: 3, character: invalid_paramarray_line.indexOf('ParamArray') + 'ParamArray'.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedCallableDeclaration',
+      message: 'Optional parameter default value is missing.',
+      range: {
+        start: { line: 5, character: empty_default_line.indexOf('=') },
+        end: { line: 5, character: empty_default_line.indexOf('=') + 1 }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedCallableDeclaration',
+      message: 'Declare statement must specify Lib "library".',
+      range: {
+        start: { line: 7, character: missing_lib_line.indexOf('FindWindow') },
+        end: { line: 7, character: missing_lib_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+});
+
+test('syntax diagnostics report invalid callable declaration modifiers', () => {
+  const invalid_order_line = 'Static Public Sub Run()';
+  const incompatible_visibility_line = 'Public Private Function Read() As String';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        invalid_order_line,
+        'End Sub',
+        incompatible_visibility_line,
+        'End Function'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Worker.bas'), [
+    {
+      code: 'syntax.malformedCallableDeclaration',
+      message: 'Visibility modifier must precede Static in a callable declaration.',
+      range: {
+        start: { line: 3, character: invalid_order_line.indexOf('Public') },
+        end: { line: 3, character: invalid_order_line.indexOf('Public') + 'Public'.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedCallableDeclaration',
+      message: 'Callable declaration has incompatible visibility modifiers.',
+      range: {
+        start: { line: 5, character: incompatible_visibility_line.indexOf('Private') },
+        end: { line: 5, character: incompatible_visibility_line.indexOf('Private') + 'Private'.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+});
+
+test('syntax diagnostics ignore valid callable declarations and preserve signatures', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        'Public Declare PtrSafe Function FindWindow Lib "user32" Alias "FindWindowA" (ByVal Caption As String) As LongPtr',
+        'Public Event Completed(ByVal Result As String)',
+        'Public Property Get DisplayName() As String',
+        'End Property',
+        'Public Property Let DisplayName(ByVal Value As String)',
+        'End Property',
+        'Public Function ReadValue(ByVal Key As String, Optional ByVal Fallback As String = "n/a") As String',
+        'End Function',
+        'Public Sub Run()',
+        '    ReadValue("id", ',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Worker.bas'), []);
+  assert.deepEqual(getSignatureHelp(project, {
+    uri: 'file:///project/Worker.bas',
+    position: { line: 12, character: 20 }
+  })?.label, 'ReadValue(Key, Optional Fallback) As String');
+});
+
+test('callable declaration diagnostics cover cls and frm code while ignoring frm designer text', () => {
+  const class_invalid_line = 'Public Property Set (ByVal Value As Object)';
+  const form_invalid_line = 'Public Event Click(ByVal Button As Integer';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Customer.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "Customer"',
+        'Option Explicit',
+        '',
+        class_invalid_line,
+        'End Property'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/Dialog.frm',
+      text: [
+        'VERSION 5.00',
+        'Begin VB.Form Dialog',
+        '  Caption = "Public Event Click(ByVal Button As Integer"',
+        'End',
+        'Attribute VB_Name = "Dialog"',
+        'Option Explicit',
+        '',
+        form_invalid_line
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Customer.cls'), [
+    {
+      code: 'syntax.malformedCallableDeclaration',
+      message: 'Callable declaration is missing a name.',
+      range: {
+        start: { line: 4, character: class_invalid_line.indexOf('(') },
+        end: { line: 4, character: class_invalid_line.indexOf('(') }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Dialog.frm'), [
+    {
+      code: 'syntax.malformedCallableDeclaration',
+      message: 'Callable parameter list is missing a closing parenthesis.',
+      range: {
+        start: { line: 7, character: form_invalid_line.indexOf('(') },
+        end: { line: 7, character: form_invalid_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+});
+
+test('malformed callable declarations keep surrounding ModuleMember ranges usable', () => {
+  const malformed_line = 'Public Function ReadValue(ByVal Key As String';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        malformed_line,
+        'End Function'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Worker.bas'), [
+    {
+      code: 'syntax.malformedCallableDeclaration',
+      message: 'Callable parameter list is missing a closing parenthesis.',
+      range: {
+        start: { line: 3, character: malformed_line.indexOf('(') },
+        end: { line: 3, character: malformed_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+  assert.deepEqual(getModuleMemberRanges(project, 'file:///project/Worker.bas'), [
+    {
+      start: { line: 3, character: 0 },
+      end: { line: 4, character: 'End Function'.length }
+    }
+  ]);
+});
+
 test('syntax diagnostics cover cls and frm code while ignoring frm designer text', () => {
   const class_invalid_line = '        "needle", _ \' class';
   const form_invalid_line = '        "needle", _ \' form';

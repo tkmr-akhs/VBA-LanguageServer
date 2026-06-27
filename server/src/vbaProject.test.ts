@@ -503,7 +503,8 @@ test('syntax diagnostics ignore valid statement boundaries labels line numbers a
         '10 Debug.Print "x": Debug.Print "y": GoTo Start',
         '    value = 1 \' End Sub extra :: ,',
         '    Rem End Sub extra :: ,',
-        '    Next index, other_index',
+        '    For index = 1 To 1',
+        '    Next index',
         'End Sub'
       ].join('\n')
     }
@@ -1643,6 +1644,169 @@ test('syntax diagnostics ignore valid enum and type blocks while preserving defi
         start: { line: 10, character: 4 },
         end: { line: 10, character: 8 }
       }
+    }
+  ]);
+});
+
+test('syntax diagnostics report missing unexpected and mismatched executable block closers', () => {
+  const mismatched_line = '    End If';
+  const unexpected_line = '    Next';
+  const missing_function_line = 'Public Function Missing() As String';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Blocks.bas',
+      text: [
+        'Attribute VB_Name = "Blocks"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    If ready Then',
+        '        With target',
+        mismatched_line,
+        unexpected_line,
+        'End Sub',
+        missing_function_line
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Blocks.bas'), [
+    {
+      code: 'syntax.malformedBlockStructure',
+      message: 'Mismatched block closer; expected End With.',
+      range: {
+        start: { line: 6, character: mismatched_line.search(/\S/) },
+        end: { line: 6, character: mismatched_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedBlockStructure',
+      message: 'Unexpected Next without a matching For block.',
+      range: {
+        start: { line: 7, character: unexpected_line.search(/\S/) },
+        end: { line: 7, character: unexpected_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedBlockStructure',
+      message: 'Function block is missing End Function.',
+      range: {
+        start: { line: 9, character: missing_function_line.indexOf('Function') },
+        end: { line: 9, character: missing_function_line.indexOf('Function') + 'Function'.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+  assert.deepEqual(getModuleMemberRanges(project, 'file:///project/Blocks.bas'), [
+    {
+      start: { line: 3, character: 0 },
+      end: { line: 8, character: 'End Sub'.length }
+    },
+    {
+      start: { line: 9, character: 0 },
+      end: { line: 9, character: missing_function_line.length }
+    }
+  ]);
+});
+
+test('syntax diagnostics ignore valid nested executable block structure', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Blocks.bas',
+      text: [
+        'Attribute VB_Name = "Blocks"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    For Each item In items',
+        '        If item.Enabled Then',
+        '            Do',
+        '            Loop',
+        '        ElseIf item.Pending Then',
+        '            While item.Ready',
+        '            Wend',
+        '        Else',
+        '            With item',
+        '                Select Case item.Kind',
+        '                Case 1',
+        '                    item.Value = 1',
+        '                Case Else',
+        '                    item.Value = 0',
+        '                End Select',
+        '            End With',
+        '        End If',
+        '    Next',
+        'End Sub',
+        '',
+        'Public Function Read() As String',
+        'End Function',
+        '',
+        'Public Property Get DisplayName() As String',
+        'End Property'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Blocks.bas'), []);
+});
+
+test('block structure diagnostics cover cls and frm code while ignoring frm designer text', () => {
+  const class_mismatched_line = 'End Sub';
+  const form_unexpected_line = 'Wend';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Runner.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "Runner"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    Do',
+        class_mismatched_line
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/Dialog.frm',
+      text: [
+        'VERSION 5.00',
+        'Begin VB.Form Dialog',
+        '  Caption = "Wend"',
+        'End',
+        'Attribute VB_Name = "Dialog"',
+        'Option Explicit',
+        form_unexpected_line
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Runner.cls'), [
+    {
+      code: 'syntax.malformedBlockStructure',
+      message: 'Mismatched block closer; expected Loop.',
+      range: {
+        start: { line: 6, character: 0 },
+        end: { line: 6, character: class_mismatched_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Dialog.frm'), [
+    {
+      code: 'syntax.malformedBlockStructure',
+      message: 'Unexpected Wend without a matching While block.',
+      range: {
+        start: { line: 6, character: 0 },
+        end: { line: 6, character: form_unexpected_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
     }
   ]);
 });

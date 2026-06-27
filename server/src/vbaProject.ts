@@ -152,6 +152,7 @@ export type SyntaxDiagnosticCode =
   | 'syntax.malformedCallableDeclaration'
   | 'syntax.malformedDeclaration'
   | 'syntax.malformedDeclarationBlock'
+  | 'syntax.malformedBlockStructure'
   | 'syntax.malformedAttribute'
   | 'syntax.malformedDateLiteral'
   | 'syntax.malformedOption'
@@ -1090,7 +1091,8 @@ function parseModuleIdentity(lines: string[]): { name: string; range: SourceRang
 function collectSyntaxDiagnostics(lines: string[], codeStartLine: number): SyntaxDiagnostic[] {
   const diagnostics = [
     ...collectHeaderSyntaxDiagnostics(lines, codeStartLine),
-    ...collectDeclarationBlockDiagnostics(lines, codeStartLine)
+    ...collectDeclarationBlockDiagnostics(lines, codeStartLine),
+    ...collectBlockStructureDiagnostics(lines, codeStartLine)
   ];
   const header_diagnostic_lines = new Set(diagnostics.map((diagnostic) => diagnostic.range.start.line));
   for (let line_index = codeStartLine; line_index < lines.length; line_index += 1) {
@@ -2767,6 +2769,425 @@ function createMalformedDeclarationBlockDiagnostic(
 ): SyntaxDiagnostic {
   return {
     code: 'syntax.malformedDeclarationBlock',
+    message,
+    range: {
+      start: { line: lineIndex, character: startCharacter },
+      end: { line: lineIndex, character: endCharacter }
+    },
+    severity: 'error',
+    source: 'vba-language-server'
+  };
+}
+
+type ExecutableBlockKind =
+  | 'sub'
+  | 'function'
+  | 'property'
+  | 'if'
+  | 'select'
+  | 'with'
+  | 'for'
+  | 'do'
+  | 'while';
+
+interface ExecutableBlock {
+  kind: ExecutableBlockKind;
+  openerName: string;
+  openerLine: number;
+  openerStart: number;
+  openerEnd: number;
+  expectedCloser: string;
+}
+
+interface ExecutableBlockCloser {
+  kind: ExecutableBlockKind;
+  label: string;
+  openerName: string;
+  start: number;
+  end: number;
+}
+
+function collectBlockStructureDiagnostics(lines: string[], codeStartLine: number): SyntaxDiagnostic[] {
+  const diagnostics: SyntaxDiagnostic[] = [];
+  const stack: ExecutableBlock[] = [];
+  let skipped_declaration_block: DeclarationBlockKind | undefined;
+
+  for (let line_index = codeStartLine; line_index < lines.length; line_index += 1) {
+    const line = lines[line_index];
+    const code_end = getCodeEndCharacter(line);
+    const structure_text = getCodeTextForStructure(line).trim();
+    if (structure_text === '' || isCommentOnlyLine(line) || isHeaderLine(structure_text)) {
+      continue;
+    }
+
+    const declaration_closer = getDeclarationBlockCloser(line, line_index, code_end);
+    if (skipped_declaration_block !== undefined) {
+      if (declaration_closer?.kind === skipped_declaration_block) {
+        skipped_declaration_block = undefined;
+      }
+      continue;
+    }
+
+    const declaration_header = getDeclarationBlockHeader(line, line_index, code_end);
+    if (declaration_header !== undefined) {
+      skipped_declaration_block = declaration_header.kind;
+      continue;
+    }
+    if (declaration_closer !== undefined) {
+      continue;
+    }
+
+    const closer = getExecutableBlockCloser(line, code_end);
+    if (closer !== undefined) {
+      const open_block = stack[stack.length - 1];
+      if (open_block === undefined) {
+        if (shouldSuppressUnexpectedCallableCloser(lines, line_index, closer)) {
+          continue;
+        }
+        diagnostics.push(createMalformedBlockStructureDiagnostic(
+          `Unexpected ${closer.label} without a matching ${closer.openerName} block.`,
+          line_index,
+          closer.start,
+          closer.end
+        ));
+        continue;
+      }
+
+      if (closer.kind !== open_block.kind) {
+        const matching_index = findLastExecutableBlockIndex(stack, closer.kind);
+        if (matching_index === -1) {
+          diagnostics.push(createMalformedBlockStructureDiagnostic(
+            `Unexpected ${closer.label} without a matching ${closer.openerName} block.`,
+            line_index,
+            closer.start,
+            closer.end
+          ));
+          continue;
+        }
+
+        diagnostics.push(createMalformedBlockStructureDiagnostic(
+          `Mismatched block closer; expected ${open_block.expectedCloser}.`,
+          line_index,
+          closer.start,
+          closer.end
+        ));
+
+        stack.length = matching_index;
+        continue;
+      }
+
+      stack.pop();
+      continue;
+    }
+
+    const opener = getExecutableBlockOpener(line, code_end);
+    if (opener !== undefined) {
+      stack.push({
+        ...opener,
+        openerLine: line_index
+      });
+    }
+  }
+
+  for (let stack_index = stack.length - 1; stack_index >= 0; stack_index -= 1) {
+    const open_block = stack[stack_index];
+    diagnostics.push(createMalformedBlockStructureDiagnostic(
+      `${open_block.openerName} block is missing ${open_block.expectedCloser}.`,
+      open_block.openerLine,
+      open_block.openerStart,
+      open_block.openerEnd
+    ));
+  }
+
+  return diagnostics;
+}
+
+function getExecutableBlockOpener(
+  line: string,
+  codeEnd: number
+): Omit<ExecutableBlock, 'openerLine'> | undefined {
+  const code_text = line.slice(0, codeEnd);
+  const structure_text = getCodeTextForStructure(line).trim();
+  const matchers: Array<{
+    kind: ExecutableBlockKind;
+    openerName: string;
+    expectedCloser: string;
+    pattern: RegExp;
+    keyword: string;
+  }> = [
+    {
+      kind: 'sub',
+      openerName: 'Sub',
+      expectedCloser: 'End Sub',
+      pattern: new RegExp(`^\\s*(?:(?:Public|Private|Friend|Static)\\s+)*Sub\\s+${C_IDENTIFIER_PATTERN.source}\\b`, 'i'),
+      keyword: 'Sub'
+    },
+    {
+      kind: 'function',
+      openerName: 'Function',
+      expectedCloser: 'End Function',
+      pattern: new RegExp(`^\\s*(?:(?:Public|Private|Friend|Static)\\s+)*Function\\s+${C_IDENTIFIER_PATTERN.source}\\b`, 'i'),
+      keyword: 'Function'
+    },
+    {
+      kind: 'property',
+      openerName: 'Property',
+      expectedCloser: 'End Property',
+      pattern: new RegExp(`^\\s*(?:(?:Public|Private|Friend|Static)\\s+)*Property\\s+(?:Get|Let|Set)\\s+${C_IDENTIFIER_PATTERN.source}\\b`, 'i'),
+      keyword: 'Property'
+    },
+    {
+      kind: 'if',
+      openerName: 'If',
+      expectedCloser: 'End If',
+      pattern: /^\s*If\b.*\bThen\s*$/i,
+      keyword: 'If'
+    },
+    {
+      kind: 'for',
+      openerName: 'For',
+      expectedCloser: 'Next',
+      pattern: /^\s*For\b/i,
+      keyword: 'For'
+    },
+    {
+      kind: 'do',
+      openerName: 'Do',
+      expectedCloser: 'Loop',
+      pattern: /^\s*Do\b/i,
+      keyword: 'Do'
+    },
+    {
+      kind: 'while',
+      openerName: 'While',
+      expectedCloser: 'Wend',
+      pattern: /^\s*While\b/i,
+      keyword: 'While'
+    },
+    {
+      kind: 'select',
+      openerName: 'Select',
+      expectedCloser: 'End Select',
+      pattern: /^\s*Select\s+Case\b/i,
+      keyword: 'Select'
+    },
+    {
+      kind: 'with',
+      openerName: 'With',
+      expectedCloser: 'End With',
+      pattern: /^\s*With\b/i,
+      keyword: 'With'
+    }
+  ];
+
+  for (const matcher of matchers) {
+    if (matcher.kind === 'if' && /^ElseIf\b/i.test(structure_text)) {
+      continue;
+    }
+    if (!matcher.pattern.test(code_text)) {
+      continue;
+    }
+
+    const keyword_match = new RegExp(`\\b${matcher.keyword}\\b`, 'i').exec(code_text);
+    const opener_start = keyword_match?.index ?? line.search(/\S/);
+    return {
+      kind: matcher.kind,
+      openerName: matcher.openerName,
+      openerStart: opener_start,
+      openerEnd: opener_start + matcher.keyword.length,
+      expectedCloser: matcher.expectedCloser
+    };
+  }
+
+  return undefined;
+}
+
+function getExecutableBlockCloser(line: string, codeEnd: number): ExecutableBlockCloser | undefined {
+  const code_text = line.slice(0, codeEnd);
+  const end_match = /^\s*End\s+(Sub|Function|Property|If|Select|With)\s*$/i.exec(code_text);
+  if (end_match !== null) {
+    const closer_name = `End ${canonicalExecutableCloserName(end_match[1])}`;
+    const kind = executableCloserKind(end_match[1]);
+    return {
+      kind,
+      label: closer_name,
+      openerName: executableOpenerName(kind),
+      start: line.search(/\S/),
+      end: end_match[0].length
+    };
+  }
+
+  const next_match = new RegExp(`^\\s*Next(?:\\s+${C_IDENTIFIER_PATTERN.source}(?:\\s*,\\s*${C_IDENTIFIER_PATTERN.source})*)?\\s*$`, 'i').exec(code_text);
+  if (next_match !== null) {
+    return {
+      kind: 'for',
+      label: 'Next',
+      openerName: 'For',
+      start: line.search(/\S/),
+      end: next_match[0].length
+    };
+  }
+
+  const loop_match = /^\s*Loop(?:\s+(?:While|Until)\b.+)?\s*$/i.exec(code_text);
+  if (loop_match !== null) {
+    return {
+      kind: 'do',
+      label: 'Loop',
+      openerName: 'Do',
+      start: line.search(/\S/),
+      end: loop_match[0].length
+    };
+  }
+
+  const wend_match = /^\s*Wend\s*$/i.exec(code_text);
+  if (wend_match === null) {
+    return undefined;
+  }
+
+  return {
+    kind: 'while',
+    label: 'Wend',
+    openerName: 'While',
+    start: line.search(/\S/),
+    end: wend_match[0].length
+  };
+}
+
+function shouldSuppressUnexpectedCallableCloser(
+  lines: string[],
+  closerLine: number,
+  closer: ExecutableBlockCloser
+): boolean {
+  if (closer.kind !== 'sub' && closer.kind !== 'function' && closer.kind !== 'property') {
+    return false;
+  }
+
+  for (let line_index = closerLine - 1; line_index >= 0; line_index -= 1) {
+    const line = lines[line_index];
+    const code_end = getCodeEndCharacter(line);
+    if (skipWhitespace(line, 0, code_end) >= code_end || isCommentOnlyLine(line)) {
+      continue;
+    }
+
+    const head = getCallableDeclarationHead(line, code_end);
+    if (head === undefined) {
+      return false;
+    }
+
+    const head_kind = head.kind === 'sub' || head.kind === 'function' || head.kind === 'property'
+      ? head.kind
+      : undefined;
+    return head_kind === closer.kind
+      && collectCallableDeclarationDiagnostics(line, line_index).length > 0;
+  }
+
+  return false;
+}
+
+function executableCloserKind(value: string): ExecutableBlockKind {
+  const lower_value = value.toLowerCase();
+  if (lower_value === 'sub') {
+    return 'sub';
+  }
+  if (lower_value === 'function') {
+    return 'function';
+  }
+  if (lower_value === 'property') {
+    return 'property';
+  }
+  if (lower_value === 'if') {
+    return 'if';
+  }
+  if (lower_value === 'select') {
+    return 'select';
+  }
+  if (lower_value === 'with') {
+    return 'with';
+  }
+  if (lower_value === 'next') {
+    return 'for';
+  }
+  if (lower_value === 'loop') {
+    return 'do';
+  }
+  return 'while';
+}
+
+function canonicalExecutableCloserName(value: string): string {
+  const lower_value = value.toLowerCase();
+  if (lower_value === 'sub') {
+    return 'Sub';
+  }
+  if (lower_value === 'function') {
+    return 'Function';
+  }
+  if (lower_value === 'property') {
+    return 'Property';
+  }
+  if (lower_value === 'if') {
+    return 'If';
+  }
+  if (lower_value === 'select') {
+    return 'Select';
+  }
+  if (lower_value === 'with') {
+    return 'With';
+  }
+  if (lower_value === 'next') {
+    return 'Next';
+  }
+  if (lower_value === 'loop') {
+    return 'Loop';
+  }
+  return 'Wend';
+}
+
+function executableOpenerName(kind: ExecutableBlockKind): string {
+  if (kind === 'sub') {
+    return 'Sub';
+  }
+  if (kind === 'function') {
+    return 'Function';
+  }
+  if (kind === 'property') {
+    return 'Property';
+  }
+  if (kind === 'if') {
+    return 'If';
+  }
+  if (kind === 'select') {
+    return 'Select';
+  }
+  if (kind === 'with') {
+    return 'With';
+  }
+  if (kind === 'for') {
+    return 'For';
+  }
+  if (kind === 'do') {
+    return 'Do';
+  }
+  return 'While';
+}
+
+function findLastExecutableBlockIndex(stack: ExecutableBlock[], kind: ExecutableBlockKind): number {
+  for (let stack_index = stack.length - 1; stack_index >= 0; stack_index -= 1) {
+    if (stack[stack_index].kind === kind) {
+      return stack_index;
+    }
+  }
+
+  return -1;
+}
+
+function createMalformedBlockStructureDiagnostic(
+  message: string,
+  lineIndex: number,
+  startCharacter: number,
+  endCharacter: number
+): SyntaxDiagnostic {
+  return {
+    code: 'syntax.malformedBlockStructure',
     message,
     range: {
       start: { line: lineIndex, character: startCharacter },

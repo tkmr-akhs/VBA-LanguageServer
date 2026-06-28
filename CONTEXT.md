@@ -77,6 +77,10 @@ _Avoid_: parameter list, call text, method shape
 A call argument that uses a top-level `Identifier:=` prefix to select a `CallableSignature` parameter by name. A `NamedArgument` belongs to the caller's argument syntax, not to the `CallableSignature` metadata itself.
 _Avoid_: named parameter, keyword argument, signature parameter
 
+**ParenthesisFreeCall**:
+A call syntax where the caller writes a callable name or member chain as a statement target, then statement-call spacing and optional argument text, without an opening `(` after the callable. A `ParenthesisFreeCall` belongs to the caller's statement syntax, not to the `CallableSignature` metadata itself.
+_Avoid_: unparenthesized call, no-paren call, parenthesis-free call statement
+
 **HostSignatureDiscovery**:
 The process of collecting `CallableSignature` and type metadata for `HostDefinition`s from an available `HostApplication` catalog source. It enriches host metadata so editor features can show accurate signature help without guessing signatures from member names alone.
 _Avoid_: COM refresh, member scan, metadata scrape
